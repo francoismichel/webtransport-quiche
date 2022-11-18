@@ -1,0 +1,28 @@
+[package]
+name = "webtransport_quiche"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# quiche = "0.16.0"
+quiche = {git = "ssh://git@github.com/francoismichel/quiche.git"}
+octets = "0.2.0"
+log = "0.4.17"
+mio = { version = "0.8", features = ["net", "os-poll"] }
+ring = "0.16"
+url = "1"
+env_logger = "0.9.3"
+
+[lib]
+name = "webtransport_quiche"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webtransport_server"
+path = "examples/webtransport-server.rs"
+
+[[bin]]
+name = "webtransport_client"
+path = "examples/webtransport-client.rs"
