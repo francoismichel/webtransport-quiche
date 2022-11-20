@@ -14,6 +14,8 @@ mio = { version = "0.8", features = ["net", "os-poll"] }
 ring = "0.16"
 url = "1"
 env_logger = "0.9.3"
+rand = "0.8.5"
+regex = "1.7.0"
 
 [lib]
 name = "webtransport_quiche"
@@ -22,6 +24,14 @@ path = "src/lib.rs"
 [[bin]]
 name = "webtransport_server"
 path = "examples/webtransport-server.rs"
+
+[[bin]]
+name = "interop_server"
+path = "interop/interop_server.rs"
+
+[[bin]]
+name = "simple_webtransport_server"
+path = "examples/simple-webtransport-server.rs"
 
 [[bin]]
 name = "webtransport_client"

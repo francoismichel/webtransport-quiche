@@ -375,7 +375,7 @@ fn main() {
                     conn,
                     http3_conn: None,
                     partial_responses: HashMap::new(),
-                    webtransport_sessions: webtransport_quiche::Sessions::new(),
+                    webtransport_sessions: webtransport_quiche::Sessions::new(true),
                 };
 
                 client.webtransport_sessions.configure_h3_for_webtransport(&mut h3_config);

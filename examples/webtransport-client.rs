@@ -73,7 +73,7 @@ fn main() {
 
     let mut webtransport_sessions_in_creation = std::collections::HashSet::new();
 
-    let mut webtransport_sessions = webtransport_quiche::Sessions::new();
+    let mut webtransport_sessions = webtransport_quiche::Sessions::new(true);
 
     // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
     // server address. This is needed on macOS and BSD variants that don't
