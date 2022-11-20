@@ -56,14 +56,14 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn new() -> Sessions {
+    pub fn new(ignore_webtransport_setting: bool) -> Sessions {
         // nothing to do
         Sessions {
             stream_id_to_session_id: std::collections::HashMap::new(),
             partial_session_ids: std::collections::HashMap::new(),
             readable_streams: std::collections::HashMap::new(),
             finished_streams: std::collections::HashSet::new(),
-            ignore_webtransport_setting: true,
+            ignore_webtransport_setting,
         }
     }
 
@@ -247,7 +247,7 @@ impl Sessions {
 
 impl Default for Sessions {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
