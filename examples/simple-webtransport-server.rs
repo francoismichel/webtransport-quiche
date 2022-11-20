@@ -436,7 +436,6 @@ fn main() {
             }
 
             if client.http3_conn.is_some() {
-                webtransport_echo_handler.handle_client(client).unwrap();
                 // Handle writable streams.
                 for stream_id in client.conn.writable() {
                     handle_writable(client, stream_id);
@@ -504,6 +503,10 @@ fn main() {
                         },
                     }
 
+                    match webtransport_echo_handler.handle_client(client) {
+                        Ok(()) => (),
+                        Err(e) => error!("WebTransport handling error {:?}", e),
+                    }
                 }
             }
         }
@@ -513,10 +516,6 @@ fn main() {
         // them on the UDP socket, until quiche reports that there are no more
         // packets to be sent.
         for client in clients.values_mut() {
-            match webtransport_echo_handler.handle_client(client) {
-                Ok(()) => (),
-                Err(e) => error!("WebTransport handling error {:?}", e),
-            }
             loop {
                 let (write, send_info) = match client.conn.send(&mut out) {
                     Ok(v) => v,
