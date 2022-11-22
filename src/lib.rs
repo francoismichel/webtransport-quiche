@@ -78,12 +78,12 @@ impl Sessions {
     pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) {
         // enable_webtransport settings
         // h3_config.set_raw_settings(vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]);
-        let raw_settings = if self.google_chrome_compatible {
+        let additional_settings = if self.google_chrome_compatible {
             vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]
         } else {
             vec![H3_SETTING_ENABLE_WEBTRANSPORT]
         };
-        h3_config.set_raw_settings(raw_settings);
+        h3_config.set_additional_settings(additional_settings);
     }
 
     pub fn h3_connect_new_webtransport_session(&mut self, h3_conn: &mut quiche::h3::Connection, new_session_id: u64) -> Result<(), Error> {
