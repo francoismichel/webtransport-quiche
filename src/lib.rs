@@ -7,6 +7,8 @@ use octets;
 
 const WEBTRANSPORT_UNI_STREAM_TYPE: u64 = 0x54;
 const H3_SETTING_ENABLE_WEBTRANSPORT: (u64, u64) = (0x2b603742, 1);
+const H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC: (u64, u64) = (0xFFD277, 1);
+const H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC: (u64, u64) = (0x8, 1);
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right
@@ -52,7 +54,8 @@ pub struct Sessions {
     partial_session_ids: HashMap<u64, PartialSessionID>,
     readable_streams: HashMap<u64, u64>,
     finished_streams: HashSet<u64>,
-    ignore_webtransport_setting: bool,
+    ignore_enable_webtransport_setting_absence: bool,
+    google_chrome_compatible: bool,
 }
 
 impl Sessions {
@@ -63,7 +66,8 @@ impl Sessions {
             partial_session_ids: std::collections::HashMap::new(),
             readable_streams: std::collections::HashMap::new(),
             finished_streams: std::collections::HashSet::new(),
-            ignore_webtransport_setting,
+            ignore_enable_webtransport_setting_absence: ignore_webtransport_setting,
+            google_chrome_compatible: true,
         }
     }
 
@@ -73,11 +77,17 @@ impl Sessions {
 
     pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) {
         // enable_webtransport settings
-        h3_config.set_raw_settings(vec![H3_SETTING_ENABLE_WEBTRANSPORT]);
+        // h3_config.set_raw_settings(vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]);
+        let raw_settings = if self.google_chrome_compatible {
+            vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]
+        } else {
+            vec![H3_SETTING_ENABLE_WEBTRANSPORT]
+        };
+        h3_config.set_raw_settings(raw_settings);
     }
 
     pub fn h3_connect_new_webtransport_session(&mut self, h3_conn: &mut quiche::h3::Connection, new_session_id: u64) -> Result<(), Error> {
-        if self.ignore_webtransport_setting {
+        if self.ignore_enable_webtransport_setting_absence {
             return Ok(());
         }
         let raw_settings = h3_conn.peer_settings_raw();
@@ -88,11 +98,9 @@ impl Sessions {
                         return Ok(())
                     }
                 }
-                trace!("BAD SETTINGS, RAW = {:?}", raw);
                 Err(Error::BadH3Settings)
             }
             None => {
-                trace!("BAD SETTINGS2");
                 Err(Error::BadH3Settings)
             }
         }
@@ -120,12 +128,6 @@ impl Sessions {
             None => Err(Error::SessionNotFound)
         }
     }
-
-    /// (stream_id, session_id)
-    // pub fn readable(&self) -> std::collections::hash_map::Iter<u64, u64> {
-    //     self.readable_streams.iter()
-    // }
-
 
     /// (stream_id, session_id)
     pub fn readable(&self) -> Vec<(u64, u64)> {
@@ -236,7 +238,7 @@ impl Sessions {
         vec![
             quiche::h3::Header::new(b":method", b"CONNECT"),
             quiche::h3::Header::new(b":scheme", b"https"),
-            quiche::h3::Header::new(b":authority", b"quic.tech"),
+            quiche::h3::Header::new(b":authority", b"quic-interop"),
             quiche::h3::Header::new(b":path", path.as_bytes()),
             quiche::h3::Header::new(b":protocol", b"webtransport"),
             quiche::h3::Header::new(b"user-agent", b"quiche"),
