@@ -34,12 +34,11 @@ use rand::Rng;
 
 use std::net;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 
 use ring::rand::*;
 
 use quiche::h3::NameValue;
-use webtransport_quiche::Sessions;
 use regex::Regex;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
@@ -70,7 +69,6 @@ struct Client {
 
 #[derive(Debug)]
 enum Error {
-    BadH3Connection,
     WebTransportError(webtransport_quiche::Error),
 }
 
@@ -103,13 +101,6 @@ fn parse_connect_query(query: &str, re: &Regex) -> Option<(u32, usize)> {
             _ => None,
         },
         _ => None,
-    }
-}
-
-fn process_connect_query_random(n_streams: u32, size: usize, session_id: u64, interop_handler: &mut InteropHandler) {
-    trace!("webtransport: process random query: {} streams of {} bytes", n_streams, size);
-    for _ in 0..n_streams {
-        interop_handler.add_random_uni_stream(session_id, size);
     }
 }
 
@@ -203,8 +194,6 @@ fn main() {
     let mut clients = ClientMap::new();
 
     let local_addr = socket.local_addr().unwrap();
-
-    let mut webtransport_paths = std::collections::HashSet::from(["/webtransport"]);
 
     let re = Regex::new(r"/webtransport/interop/uni/(\d+)/(\d+)/*").unwrap();
 
@@ -370,7 +359,7 @@ fn main() {
                     }
                 }
 
-                let mut client = Client {
+                let client = Client {
                     conn,
                     http3_conn: None,
                     partial_responses: HashMap::new(),
@@ -451,7 +440,7 @@ fn main() {
                         Err(e) => error!("WebTransport handling error {:?}", e),
                     }
 
-                    let mut http3_conn = client.http3_conn.as_mut().unwrap();
+                    let http3_conn = client.http3_conn.as_mut().unwrap();
                     
                     match http3_conn.poll(&mut client.conn) {
                         Ok((
@@ -477,7 +466,9 @@ fn main() {
                         },
 
                         Ok((stream_id, quiche::h3::Event::Finished)) => {
-                            client.webtransport_sessions.h3_stream_finished(stream_id, http3_conn, &mut client.conn);
+                            if let Err(e) = client.webtransport_sessions.h3_stream_finished(stream_id, http3_conn, &mut client.conn) {
+                                error!("could not signal finished stream {} to webtransport session: {:?}", stream_id, e);
+                            }
                         },
 
                         Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
@@ -492,7 +483,9 @@ fn main() {
                         Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
 
                         Ok((stream_id, quiche::h3::Event::ApplicationPipeData(_))) => {
-                            client.webtransport_sessions.available_h3_stream_data(stream_id, http3_conn, &mut client.conn);
+                            if let Err(e) = client.webtransport_sessions.available_h3_stream_data(stream_id, http3_conn, &mut client.conn) {
+                                error!("could not provide stream {} data to webtransport session: {:?}", stream_id, e);
+                            }
                         },
 
                         Err(quiche::h3::Error::Done) => {
@@ -631,7 +624,7 @@ fn handle_request(
     random_payload: &[u8]
 ) {
     let conn = &mut client.conn;
-    let mut http3_conn = &mut client.http3_conn.as_mut().unwrap();
+    let http3_conn = &mut client.http3_conn.as_mut().unwrap();
 
     let (contains_webtransport_connect, path_opt) = contains_webtransport_connect(headers, connect_allowed_paths);
 
@@ -667,7 +660,7 @@ fn handle_request(
     
 
     // TODO
-    let (status, body) = if !invalid_query && client.webtransport_sessions.h3_connect_new_webtransport_session(http3_conn, stream_id).is_ok() {
+    let (status, body) = if !invalid_query && client.webtransport_sessions.validate_new_webtransport_session(http3_conn).is_ok() {
         client.webtransport_sessions.pipe_h3_streams(http3_conn).unwrap();
         (200, Vec::new())
     } else if query_over_limit {

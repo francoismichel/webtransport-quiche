@@ -1,14 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use log::{warn, trace, info, error, debug};
-use mio::{net::UdpSocket, Poll};
-use quiche::{self, h3::{NameValue, self}};
+use quiche;
 use octets;
 
 const WEBTRANSPORT_UNI_STREAM_TYPE: u64 = 0x54;
 const H3_SETTING_ENABLE_WEBTRANSPORT: (u64, u64) = (0x2b603742, 1);
 const H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC: (u64, u64) = (0xFFD277, 1);
-const H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC: (u64, u64) = (0x8, 1);
+const _H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC: (u64, u64) = (0x8, 1);
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right
@@ -38,7 +36,7 @@ impl From<quiche::h3::Error> for Error {
     }
 }
 impl From<octets::BufferTooShortError> for Error {
-    fn from(err: octets::BufferTooShortError) -> Error {
+    fn from(_: octets::BufferTooShortError) -> Error {
         Error::VarintParsingError
     }
 }
@@ -77,16 +75,16 @@ impl Sessions {
 
     pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) {
         // enable_webtransport settings
-        // h3_config.set_raw_settings(vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]);
         let additional_settings = if self.google_chrome_compatible {
-            vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC, H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC]
+            // H3_SETTING_ENABLE_CONNECT_PROTOCOL not needed but sent by chromium
+            vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC]
         } else {
             vec![H3_SETTING_ENABLE_WEBTRANSPORT]
         };
         h3_config.set_additional_settings(additional_settings);
     }
 
-    pub fn h3_connect_new_webtransport_session(&mut self, h3_conn: &mut quiche::h3::Connection, new_session_id: u64) -> Result<(), Error> {
+    pub fn validate_new_webtransport_session(&mut self, h3_conn: &mut quiche::h3::Connection) -> Result<(), Error> {
         if self.ignore_enable_webtransport_setting_absence {
             return Ok(());
         }
@@ -107,7 +105,7 @@ impl Sessions {
     }
 
     pub fn is_stream_readable(
-        &mut self, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection, stream_id: u64, session_id: u64
+        &mut self, _h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection, stream_id: u64, session_id: u64
     ) -> Result<bool, Error> {
         match self.stream_id_to_session_id.get(&stream_id) {
             Some(&s) if s == session_id => {
@@ -119,10 +117,10 @@ impl Sessions {
 
 
     pub fn is_stream_finished(
-        &mut self, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection, stream_id: u64,
+        &mut self, stream_id: u64,
     ) -> Result<bool, Error> {
         match self.stream_id_to_session_id.get(&stream_id) {
-            Some(&s) => {
+            Some(&_sesion_id) => {
                 Ok(self.finished_streams.contains(&stream_id))
             }
             None => Err(Error::SessionNotFound)
@@ -227,7 +225,7 @@ impl Sessions {
             Some(&s) if s == session_id => {
                 let ret = Ok(h3_conn.recv_body(conn, stream_id, data)?);
 
-                self.update_readable_state(h3_conn, conn, stream_id, session_id);
+                self.update_readable_state(h3_conn, conn, stream_id, session_id)?;
                 ret
             }
             Some(_) | None => Err(Error::SessionNotFound)

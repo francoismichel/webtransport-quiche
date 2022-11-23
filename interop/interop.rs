@@ -1,7 +1,3 @@
-use std::collections::VecDeque;
-use std::fs::copy;
-use rand::distributions::{Distribution};
-use rand::Rng;
 use webtransport_quiche::Sessions;
 
 struct Stream {
@@ -13,17 +9,6 @@ struct Stream {
 }
 
 impl Stream {
-    fn new_random(session_id: u64, size: usize) -> Stream {
-        let mut res = vec![0; size];
-        rand::thread_rng().fill(&mut res[..]);
-        Stream{
-            data: res,
-            sent: 0,
-            stream_id: None,
-            closed: false,
-            session_id,
-        }
-    }
     fn from_data(session_id: u64, size: usize, data: &[u8]) -> Stream {
         let mut res = vec![0; size];
         let mut added = 0;
@@ -51,19 +36,11 @@ impl InteropHandler {
         InteropHandler { uni_streams: std::collections::HashMap::new() }
     }
 
-    pub fn add_random_uni_stream(&mut self, session_id: u64, size: usize) {
-        if !self.uni_streams.contains_key(&session_id) {
-            self.uni_streams.insert(session_id, Vec::new());
-        }
-        let mut session_uni_streams = self.uni_streams.get_mut(&session_id).unwrap();
-        session_uni_streams.push(Stream::new_random(session_id, size));
-    }
-
     pub fn add_uni_stream_from_data(&mut self, session_id: u64, data: &[u8]) {
         if !self.uni_streams.contains_key(&session_id) {
             self.uni_streams.insert(session_id, Vec::new());
         }
-        let mut session_uni_streams = self.uni_streams.get_mut(&session_id).unwrap();
+        let session_uni_streams = self.uni_streams.get_mut(&session_id).unwrap();
         session_uni_streams.push(Stream::from_data(session_id, data.len(), data));
     }
 
