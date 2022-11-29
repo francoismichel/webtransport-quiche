@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use quiche;
 use octets;
+use quiche;
 
 const WEBTRANSPORT_UNI_STREAM_TYPE: u64 = 0x54;
+const WEBTRANSPORT_BIDI_FRAME_TYPE: u64 = 0x41;
 const H3_SETTING_ENABLE_WEBTRANSPORT: (u64, u64) = (0x2b603742, 1);
 const H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC: (u64, u64) = (0xFFD277, 1);
 const _H3_SETTING_ENABLE_CONNECT_PROTOCOL_CHROME_SPECIFIC: (u64, u64) = (0x8, 1);
@@ -73,18 +74,31 @@ impl Sessions {
         Ok(h3_conn.set_piped_stream_types(HashSet::from([WEBTRANSPORT_UNI_STREAM_TYPE]))?)
     }
 
+    pub fn pipe_h3_query_frames(
+        &mut self,
+        h3_conn: &mut quiche::h3::Connection,
+    ) -> Result<(), Error> {
+        Ok(h3_conn.set_piped_query_frame_types(HashSet::from([WEBTRANSPORT_BIDI_FRAME_TYPE]))?)
+    }
+
     pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) {
         // enable_webtransport settings
         let additional_settings = if self.google_chrome_compatible {
             // H3_SETTING_ENABLE_CONNECT_PROTOCOL not needed but sent by chromium
-            vec![H3_SETTING_ENABLE_WEBTRANSPORT, H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC]
+            vec![
+                H3_SETTING_ENABLE_WEBTRANSPORT,
+                H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC,
+            ]
         } else {
             vec![H3_SETTING_ENABLE_WEBTRANSPORT]
         };
         h3_config.set_additional_settings(additional_settings);
     }
 
-    pub fn validate_new_webtransport_session(&mut self, h3_conn: &mut quiche::h3::Connection) -> Result<(), Error> {
+    pub fn validate_new_webtransport_session(
+        &mut self,
+        h3_conn: &mut quiche::h3::Connection,
+    ) -> Result<(), Error> {
         if self.ignore_enable_webtransport_setting_absence {
             return Ok(());
         }
@@ -93,37 +107,34 @@ impl Sessions {
             Some(raw) => {
                 for setting in raw {
                     if setting == &H3_SETTING_ENABLE_WEBTRANSPORT {
-                        return Ok(())
+                        return Ok(());
                     }
                 }
                 Err(Error::BadH3Settings)
             }
-            None => {
-                Err(Error::BadH3Settings)
-            }
+            None => Err(Error::BadH3Settings),
         }
     }
 
     pub fn is_stream_readable(
-        &mut self, _h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection, stream_id: u64, session_id: u64
+        &mut self,
+        _h3_conn: &mut quiche::h3::Connection,
+        conn: &mut quiche::Connection,
+        stream_id: u64,
+        session_id: u64,
     ) -> Result<bool, Error> {
         match self.stream_id_to_session_id.get(&stream_id) {
             Some(&s) if s == session_id => {
                 Ok(conn.stream_readable(stream_id) || self.finished_streams.contains(&stream_id))
             }
-            Some(_) | None => Err(Error::SessionNotFound)
+            Some(_) | None => Err(Error::SessionNotFound),
         }
     }
 
-
-    pub fn is_stream_finished(
-        &mut self, stream_id: u64,
-    ) -> Result<bool, Error> {
+    pub fn is_stream_finished(&mut self, stream_id: u64) -> Result<bool, Error> {
         match self.stream_id_to_session_id.get(&stream_id) {
-            Some(&_sesion_id) => {
-                Ok(self.finished_streams.contains(&stream_id))
-            }
-            None => Err(Error::SessionNotFound)
+            Some(&_sesion_id) => Ok(self.finished_streams.contains(&stream_id)),
+            None => Err(Error::SessionNotFound),
         }
     }
 
@@ -136,26 +147,35 @@ impl Sessions {
         ret
     }
 
-    fn update_readable_state(&mut self, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection, stream_id: u64, session_id: u64) -> Result<(), Error> {
-        if self.is_stream_readable(h3_conn, conn, stream_id, session_id)? {
+    fn set_readable_state(&mut self, stream_id: u64, session_id: u64, readable: bool) {
+        if readable {
             self.readable_streams.insert(stream_id, session_id);
         } else {
             self.readable_streams.remove(&stream_id);
         }
-        Ok(())
     }
 
-    pub fn h3_stream_finished(&mut self, h3_stream_id: u64, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection) -> Result<(), Error> {
+    pub fn h3_stream_finished(
+        &mut self,
+        h3_stream_id: u64,
+        _h3_conn: &mut quiche::h3::Connection,
+        _conn: &mut quiche::Connection,
+    ) -> Result<(), Error> {
         if let Some(&session_id) = self.stream_id_to_session_id.get(&h3_stream_id) {
             self.finished_streams.insert(h3_stream_id);
-            self.update_readable_state(h3_conn, conn, h3_stream_id, session_id)
+            self.set_readable_state(h3_stream_id, session_id, true);
+            Ok(())
         } else {
             Err(Error::SessionNotFound)
         }
     }
 
-
-    pub fn available_h3_stream_data(&mut self, h3_stream_id: u64, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection) -> Result<(), Error> {
+    pub fn available_h3_stream_data(
+        &mut self,
+        h3_stream_id: u64,
+        h3_conn: &mut quiche::h3::Connection,
+        conn: &mut quiche::Connection,
+    ) -> Result<(), Error> {
         let sid = match self.stream_id_to_session_id.get(&h3_stream_id) {
             Some(&session_id) => {
                 Some(session_id)
@@ -165,25 +185,37 @@ impl Sessions {
                 let mut session_id = None;
                 // create new stream ?
                 let partial_session_id = match self.partial_session_ids.get_mut(&h3_stream_id) {
-                    Some(partial_session_id) => {
-                        partial_session_id
-                    }
+                    Some(partial_session_id) => partial_session_id,
                     None => {
-                        let mut partial_session_id = PartialSessionID { data: [0; 8], received_len: 0 };
+                        let mut partial_session_id = PartialSessionID {
+                            data: [0; 8],
+                            received_len: 0,
+                        };
                         // first read the first byte only
-                        let read = h3_conn.recv_body(conn, h3_stream_id, &mut partial_session_id.data[..1])?;
-                        if read == 0 {  // could not read the first session ID's byte
+                        let read = h3_conn.recv_body(
+                            conn,
+                            h3_stream_id,
+                            &mut partial_session_id.data[..1],
+                        )?;
+                        if read == 0 {
+                            // could not read the first session ID's byte
                             return Ok(());
                         }
                         partial_session_id.received_len += 1;
-                        self.partial_session_ids.insert(h3_stream_id, partial_session_id);
+                        self.partial_session_ids
+                            .insert(h3_stream_id, partial_session_id);
                         self.partial_session_ids.get_mut(&h3_stream_id).unwrap()
                     }
                 };
-                let mut to_read = octets::varint_parse_len(partial_session_id.data[0]) - partial_session_id.received_len;
+                let mut to_read = octets::varint_parse_len(partial_session_id.data[0])
+                    - partial_session_id.received_len;
                 if to_read > 0 {
                     let offset = partial_session_id.received_len;
-                    let read = h3_conn.recv_body(conn, h3_stream_id, &mut partial_session_id.data[offset..offset+to_read])?;
+                    let read = h3_conn.recv_body(
+                        conn,
+                        h3_stream_id,
+                        &mut partial_session_id.data[offset..offset + to_read],
+                    )?;
                     to_read -= read;
                 }
                 if to_read == 0 {
@@ -197,18 +229,29 @@ impl Sessions {
             }
         };
         if let Some(session_id) = sid {
-            self.update_readable_state(h3_conn, conn, h3_stream_id, session_id)?
+            self.set_readable_state(h3_stream_id, session_id, true);
         }
         Ok(())
     }
 
-    pub fn open_uni_stream(&mut self, conn: &mut quiche::Connection, h3_conn: &mut quiche::h3::Connection, session_id: u64) -> Result<u64, Error> {
-        let stream_id = h3_conn.open_application_pipe_uni_stream(conn, WEBTRANSPORT_UNI_STREAM_TYPE)?;
+    pub fn open_uni_stream(
+        &mut self,
+        conn: &mut quiche::Connection,
+        h3_conn: &mut quiche::h3::Connection,
+        session_id: u64,
+    ) -> Result<u64, Error> {
+        let stream_id =
+            h3_conn.open_application_pipe_uni_stream(conn, WEBTRANSPORT_UNI_STREAM_TYPE)?;
         let mut data = [0u8; 8];
         let mut buf = octets::OctetsMut::with_slice(&mut data);
         buf.put_varint(session_id).unwrap();
         let data = buf.buf();
-        let written = h3_conn.send_application_pipe_stream_data(conn, stream_id, &data[..buf.off()], false)?;
+        let written = h3_conn.send_application_pipe_stream_data(
+            conn,
+            stream_id,
+            &data[..buf.off()],
+            false,
+        )?;
         if written != buf.off() {
             return Err(Error::MissingCapacityForOpeningStream);
         }
@@ -216,19 +259,35 @@ impl Sessions {
         Ok(stream_id)
     }
 
-    pub fn uni_stream_write(&mut self, conn: &mut quiche::Connection, h3_conn: &mut quiche::h3::Connection, stream_id: u64, data: &[u8], fin: bool) -> Result<usize, Error> {
+    pub fn stream_write(
+        &mut self,
+        conn: &mut quiche::Connection,
+        h3_conn: &mut quiche::h3::Connection,
+        stream_id: u64,
+        data: &[u8],
+        fin: bool,
+    ) -> Result<usize, Error> {
         Ok(h3_conn.send_application_pipe_stream_data(conn, stream_id, data, fin)?)
     }
 
-    pub fn stream_recv(&mut self, conn: &mut quiche::Connection, h3_conn: &mut quiche::h3::Connection, stream_id: u64, session_id: u64, data: &mut[u8]) -> Result<usize, Error> {
+    pub fn stream_recv(
+        &mut self,
+        conn: &mut quiche::Connection,
+        h3_conn: &mut quiche::h3::Connection,
+        stream_id: u64,
+        session_id: u64,
+        data: &mut [u8],
+    ) -> Result<usize, Error> {
         match self.stream_id_to_session_id.get(&stream_id) {
-            Some(&s) if s == session_id => {
-                let ret = Ok(h3_conn.recv_body(conn, stream_id, data)?);
-
-                self.update_readable_state(h3_conn, conn, stream_id, session_id)?;
-                ret
-            }
-            Some(_) | None => Err(Error::SessionNotFound)
+            Some(&s) if s == session_id => match h3_conn.recv_body(conn, stream_id, data) {
+                Ok(read) => Ok(read),
+                Err(quiche::h3::Error::Done) => {
+                    self.set_readable_state(stream_id, session_id, false);
+                    Err(Error::H3Error(quiche::h3::Error::Done))
+                }
+                Err(e) => Err(Error::H3Error(e)),
+            },
+            Some(_) | None => Err(Error::SessionNotFound),
         }
     }
 
@@ -242,7 +301,6 @@ impl Sessions {
             quiche::h3::Header::new(b"user-agent", b"quiche"),
         ]
     }
-
 }
 
 impl Default for Sessions {

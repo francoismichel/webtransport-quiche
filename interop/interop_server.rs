@@ -29,17 +29,20 @@ extern crate log;
 
 mod interop;
 
-use interop::InteropHandler;
+use interop::InteropQuery;
+use interop::UniStreamsInteropHandler;
 use rand::Rng;
 
 use std::net;
 
-use std::collections::{HashMap};
+use std::collections::HashMap;
 
 use ring::rand::*;
 
 use quiche::h3::NameValue;
 use regex::Regex;
+
+use docopt::Docopt;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -52,11 +55,11 @@ struct PartialResponse {
 
     written: usize,
 
-    is_connect: bool
+    is_connect: bool,
 }
 
 struct Client {
-    interop_handler: InteropHandler,
+    interop_handler: UniStreamsInteropHandler,
 
     conn: quiche::Connection,
 
@@ -70,6 +73,7 @@ struct Client {
 #[derive(Debug)]
 enum Error {
     WebTransportError(webtransport_quiche::Error),
+    InteropError(interop::Error),
 }
 
 impl From<webtransport_quiche::Error> for Error {
@@ -78,12 +82,29 @@ impl From<webtransport_quiche::Error> for Error {
     }
 }
 
-trait WebTransportHandler {
-    fn handle(&mut self, webtransport_sessions: &mut webtransport_quiche::Sessions, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection) -> Result<(), Error>;
+impl From<interop::Error> for Error {
+    fn from(err: interop::Error) -> Error {
+        Error::InteropError(err)
+    }
 }
 
-impl WebTransportHandler for InteropHandler {
-    fn handle(&mut self, webtransport_sessions: &mut webtransport_quiche::Sessions, h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection) -> Result<(), Error> {
+trait WebTransportHandler {
+    fn handle(
+        &mut self,
+        webtransport_sessions: &mut webtransport_quiche::Sessions,
+        h3_conn: &mut quiche::h3::Connection,
+        conn: &mut quiche::Connection,
+    ) -> Result<(), Error>;
+}
+
+impl WebTransportHandler for UniStreamsInteropHandler {
+    fn handle(
+        &mut self,
+        webtransport_sessions: &mut webtransport_quiche::Sessions,
+        h3_conn: &mut quiche::h3::Connection,
+        conn: &mut quiche::Connection,
+    ) -> Result<(), Error> {
+        self.handle_readable_streams(webtransport_sessions, h3_conn, conn)?;
         self.handle_writable_streams(webtransport_sessions, h3_conn, conn)?;
         // clone the sessiosn that are completed
         for session_id in self.drain_done_sessions() {
@@ -93,19 +114,34 @@ impl WebTransportHandler for InteropHandler {
     }
 }
 
-fn parse_connect_query(query: &str, re: &Regex) -> Option<(u32, usize)> {
+fn parse_connect_query(query: &str, re_uni: &Regex, re_bidi: &Regex) -> Option<InteropQuery> {
     trace!("received CONNECT query: {}", query);
-    match re.captures(query) {
-        Some(captures) => match (captures[1].parse::<u32>(), captures[2].parse::<usize>()) {
-            (Ok(n_streams), Ok(size)) => Some((n_streams, size)),
-            _ => None,
-        },
-        _ => None,
+    match re_uni.captures(query) {
+        Some(captures) => {
+            return match (captures[1].parse::<u32>(), captures[2].parse::<usize>()) {
+                (Ok(n_streams), Ok(size)) => Some(InteropQuery::UniStreams((n_streams, size))),
+                _ => None,
+            }
+        }
+        _ => (),
     }
+    if re_bidi.is_match(query) {
+        return Some(InteropQuery::EchoBidiStreams);
+    }
+    None
 }
 
-fn process_connect_query_with_data(n_streams: u32, data: &[u8], session_id: u64, interop_handler: &mut InteropHandler) {
-    trace!("webtransport: process query with data: {} streams of {} bytes", n_streams, data.len());
+fn process_uni_streams_query_with_data(
+    n_streams: u32,
+    data: &[u8],
+    session_id: u64,
+    interop_handler: &mut UniStreamsInteropHandler,
+) {
+    trace!(
+        "webtransport: process query with data: {} streams of {} bytes",
+        n_streams,
+        data.len()
+    );
     for _ in 0..n_streams {
         interop_handler.add_uni_stream_from_data(session_id, data);
     }
@@ -113,32 +149,36 @@ fn process_connect_query_with_data(n_streams: u32, data: &[u8], session_id: u64,
 
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 
+pub const USAGE: &str = "Usage:
+  interop_server [options]
+  interop_server -h | --help
+
+Options:
+  -h --help        Show this screen.
+  --listen <addr>  Listen on the given IP:port [default: 127.0.0.1:4433].
+  --cert <file>    TLS certificate path [default: examples/cert.pem].
+  --key <file>     TLS certificate key path [default: examples/cert.pem].
+";
+
 fn main() {
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let mut args = std::env::args();
+    env_logger::init();
 
-    let cmd = &args.next().unwrap();
+    let args = Docopt::new(USAGE)
+        .and_then(|dopt| dopt.parse())
+        .unwrap_or_else(|e| e.exit());
 
     let mut random_payload = vec![0; MAX_STREAM_SIZE];
     rand::thread_rng().fill(&mut random_payload[..]);
-
-    env_logger::init();
-
-    if args.len() != 0 {
-        println!("Usage: {}", cmd);
-        println!("\nSee tools/apps/ for more complete implementations.");
-        return;
-    }
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let mut socket =
-        mio::net::UdpSocket::bind("127.0.0.1:4433".parse().unwrap()).unwrap();
+    let mut socket = mio::net::UdpSocket::bind(args.get_str("--listen").parse().unwrap()).unwrap();
     poll.registry()
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
         .unwrap();
@@ -147,10 +187,10 @@ fn main() {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
     config
-        .load_cert_chain_from_pem_file("examples/cert.pem")
+        .load_cert_chain_from_pem_file(args.get_str("--cert"))
         .unwrap();
     config
-        .load_priv_key_from_pem_file("examples/key.pem")
+        .load_priv_key_from_pem_file(args.get_str("--key"))
         .unwrap();
 
     config
@@ -169,7 +209,6 @@ fn main() {
     config.set_disable_active_migration(true);
     config.enable_early_data();
     config.grease(false);
-    
 
     let mut keylog = None;
 
@@ -185,17 +224,16 @@ fn main() {
         config.log_keys();
     }
 
-
     let mut h3_config = quiche::h3::Config::new().unwrap();
     let rng = SystemRandom::new();
-    let conn_id_seed =
-        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
+    let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
 
     let local_addr = socket.local_addr().unwrap();
 
-    let re = Regex::new(r"/webtransport/interop/uni/(\d+)/(\d+)/*").unwrap();
+    let re_uni = Regex::new(r"/webtransport/interop/uni/(\d+)/(\d+)/*").unwrap();
+    let re_bidi = Regex::new(r"/webtransport/interop/bidi/*").unwrap();
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -231,7 +269,7 @@ fn main() {
                     }
 
                     panic!("recv() failed: {:?}", e);
-                },
+                }
             };
 
             debug!("got {} bytes", len);
@@ -239,16 +277,13 @@ fn main() {
             let pkt_buf = &mut buf[..len];
 
             // Parse the QUIC packet's header.
-            let hdr = match quiche::Header::from_slice(
-                pkt_buf,
-                quiche::MAX_CONN_ID_LEN,
-            ) {
+            let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
                 Ok(v) => v,
 
                 Err(e) => {
                     error!("Parsing packet header failed: {:?}", e);
                     continue 'read;
-                },
+                }
             };
 
             trace!("got packet {:?}", hdr);
@@ -259,9 +294,7 @@ fn main() {
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let client = if !clients.contains_key(&hdr.dcid) &&
-                !clients.contains_key(&conn_id)
-            {
+            let client = if !clients.contains_key(&hdr.dcid) && !clients.contains_key(&conn_id) {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
                     continue 'read;
@@ -270,9 +303,7 @@ fn main() {
                 if !quiche::version_is_supported(hdr.version) {
                     warn!("Doing version negotiation");
 
-                    let len =
-                        quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out)
-                            .unwrap();
+                    let len = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out).unwrap();
 
                     let out = &out[..len];
 
@@ -344,14 +375,8 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                let mut conn = quiche::accept(
-                    &scid,
-                    odcid.as_ref(),
-                    local_addr,
-                    from,
-                    &mut config,
-                )
-                .unwrap();
+                let mut conn =
+                    quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config).unwrap();
 
                 if let Some(keylog) = &mut keylog {
                     if let Ok(keylog) = keylog.try_clone() {
@@ -364,11 +389,12 @@ fn main() {
                     http3_conn: None,
                     partial_responses: HashMap::new(),
                     webtransport_sessions: webtransport_quiche::Sessions::new(true),
-                    interop_handler: InteropHandler::new(),
+                    interop_handler: UniStreamsInteropHandler::new(),
                 };
 
-                client.webtransport_sessions.configure_h3_for_webtransport(&mut h3_config);
-
+                client
+                    .webtransport_sessions
+                    .configure_h3_for_webtransport(&mut h3_config);
 
                 clients.insert(scid.clone(), client);
 
@@ -393,32 +419,30 @@ fn main() {
                 Err(e) => {
                     error!("{} recv failed: {:?}", client.conn.trace_id(), e);
                     continue 'read;
-                },
+                }
             };
 
             debug!("{} processed {} bytes", client.conn.trace_id(), read);
 
             // Create a new HTTP/3 connection as soon as the QUIC connection
             // is established.
-            if (client.conn.is_in_early_data() || client.conn.is_established()) &&
-                client.http3_conn.is_none()
+            if (client.conn.is_in_early_data() || client.conn.is_established())
+                && client.http3_conn.is_none()
             {
                 debug!(
                     "{} QUIC handshake completed, now trying HTTP/3",
                     client.conn.trace_id()
                 );
 
-                let h3_conn = match quiche::h3::Connection::with_transport(
-                    &mut client.conn,
-                    &h3_config,
-                ) {
-                    Ok(v) => v,
+                let h3_conn =
+                    match quiche::h3::Connection::with_transport(&mut client.conn, &h3_config) {
+                        Ok(v) => v,
 
-                    Err(e) => {
-                        error!("failed to create HTTP/3 connection: {}", e);
-                        continue 'read;
-                    },
-                };
+                        Err(e) => {
+                            error!("failed to create HTTP/3 connection: {}", e);
+                            continue 'read;
+                        }
+                    };
 
                 // TODO: sanity check h3 connection before adding to map
                 client.http3_conn = Some(h3_conn);
@@ -433,29 +457,36 @@ fn main() {
                 // Process HTTP/3 events.
                 loop {
                     let mut http3_conn = client.http3_conn.as_mut().unwrap();
-                    client.webtransport_sessions.pipe_h3_streams(&mut http3_conn).unwrap();
-                    match client.interop_handler.handle(&mut client.webtransport_sessions, &mut http3_conn, &mut client.conn) {
+                    client
+                        .webtransport_sessions
+                        .pipe_h3_streams(&mut http3_conn)
+                        .unwrap();
+                    match client.interop_handler.handle(
+                        &mut client.webtransport_sessions,
+                        &mut http3_conn,
+                        &mut client.conn,
+                    ) {
                         Ok(()) => (),
-                        Err(Error::WebTransportError(webtransport_quiche::Error::H3Error(quiche::h3::Error::Done))) => (),
+                        Err(Error::WebTransportError(webtransport_quiche::Error::H3Error(
+                            quiche::h3::Error::Done,
+                        ))) => (),
                         Err(e) => error!("WebTransport handling error {:?}", e),
                     }
 
                     let http3_conn = client.http3_conn.as_mut().unwrap();
-                    
+
                     match http3_conn.poll(&mut client.conn) {
-                        Ok((
-                            stream_id,
-                            quiche::h3::Event::Headers { list, .. },
-                        )) => {
-                            warn!("GOT HEADERS {:?}", list);
+                        Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                            trace!("got headers {:?}", list);
                             handle_request(
                                 client,
                                 stream_id,
                                 &list,
-                                &re,
+                                &re_uni,
+                                &re_bidi,
                                 &random_payload[..],
                             );
-                        },
+                        }
 
                         Ok((stream_id, quiche::h3::Event::Data)) => {
                             info!(
@@ -463,50 +494,49 @@ fn main() {
                                 client.conn.trace_id(),
                                 stream_id
                             );
-                        },
+                        }
 
                         Ok((stream_id, quiche::h3::Event::Finished)) => {
-                            if let Err(e) = client.webtransport_sessions.h3_stream_finished(stream_id, http3_conn, &mut client.conn) {
+                            if let Err(e) = client.webtransport_sessions.h3_stream_finished(
+                                stream_id,
+                                http3_conn,
+                                &mut client.conn,
+                            ) {
                                 error!("could not signal finished stream {} to webtransport session: {:?}", stream_id, e);
                             }
-                        },
+                        }
 
                         Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
 
                         Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
 
-                        Ok((
-                            _prioritized_element_id,
-                            quiche::h3::Event::PriorityUpdate,
-                        )) => (),
+                        Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => (),
 
                         Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
 
                         Ok((stream_id, quiche::h3::Event::ApplicationPipeData(_))) => {
-                            if let Err(e) = client.webtransport_sessions.available_h3_stream_data(stream_id, http3_conn, &mut client.conn) {
+                            if let Err(e) = client.webtransport_sessions.available_h3_stream_data(
+                                stream_id,
+                                http3_conn,
+                                &mut client.conn,
+                            ) {
                                 error!("could not provide stream {} data to webtransport session: {:?}", stream_id, e);
                             }
-                        },
+                        }
 
                         Err(quiche::h3::Error::Done) => {
                             break;
-                        },
+                        }
 
                         Err(e) => {
-                            error!(
-                                "{} HTTP/3 error {:?}",
-                                client.conn.trace_id(),
-                                e
-                            );
+                            error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
 
                             break;
-                        },
+                        }
                     }
-
                 }
             }
         }
-
 
         // Generate outgoing QUIC packets for all active connections and send
         // them on the UDP socket, until quiche reports that there are no more
@@ -519,14 +549,14 @@ fn main() {
                     Err(quiche::Error::Done) => {
                         debug!("{} done writing", client.conn.trace_id());
                         break;
-                    },
+                    }
 
                     Err(e) => {
                         error!("{} send failed: {:?}", client.conn.trace_id(), e);
 
                         client.conn.close(false, 0x1, b"fail").ok();
                         break;
-                    },
+                    }
                 };
 
                 if let Err(e) = socket.send_to(&out[..write], send_info.to) {
@@ -545,13 +575,18 @@ fn main() {
         // Garbage collect closed connections.
         clients.retain(|_, ref mut c| {
             debug!("Collecting garbage");
-
             if c.conn.is_closed() {
                 info!(
                     "{} connection collected {:?}",
                     c.conn.trace_id(),
                     c.conn.stats()
                 );
+                if let Some(e) = c.conn.peer_error() {
+                    info!(
+                        "Connection error: peer error reason = {:?}",
+                        String::from_utf8(e.reason.clone())
+                    );
+                }
             }
 
             !c.conn.is_closed()
@@ -590,9 +625,7 @@ fn mint_token(hdr: &quiche::Header, src: &net::SocketAddr) -> Vec<u8> {
 ///
 /// Note that this function is only an example and doesn't do any cryptographic
 /// authenticate of the token. *It should not be used in production system*.
-fn validate_token<'a>(
-    src: &net::SocketAddr, token: &'a [u8],
-) -> Option<quiche::ConnectionId<'a>> {
+fn validate_token<'a>(src: &net::SocketAddr, token: &'a [u8]) -> Option<quiche::ConnectionId<'a>> {
     if token.len() < 6 {
         return None;
     }
@@ -615,18 +648,20 @@ fn validate_token<'a>(
     Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
 }
 
-
-
 /// Handles incoming HTTP/3 requests.
 fn handle_request(
-    client: &mut Client, stream_id: u64, headers: &[quiche::h3::Header],
-    connect_allowed_paths: &Regex,
-    random_payload: &[u8]
+    client: &mut Client,
+    stream_id: u64,
+    headers: &[quiche::h3::Header],
+    connect_uni_uri: &Regex,
+    connect_bidi_uri: &Regex,
+    random_payload: &[u8],
 ) {
     let conn = &mut client.conn;
     let http3_conn = &mut client.http3_conn.as_mut().unwrap();
 
-    let (contains_webtransport_connect, path_opt) = contains_webtransport_connect(headers, connect_allowed_paths);
+    let (contains_webtransport_connect, path_opt) =
+        contains_webtransport_connect(headers, connect_uni_uri, connect_bidi_uri);
 
     info!(
         "{} got request {:?} on stream id {}, contains_webtransport_connect = {}",
@@ -636,51 +671,102 @@ fn handle_request(
         contains_webtransport_connect
     );
 
-
     let parsed_query = match path_opt {
-        Some(path) => parse_connect_query(&path, connect_allowed_paths),
+        Some(path) => parse_connect_query(&path, connect_uni_uri, connect_bidi_uri),
         None => None,
+    };
+
+    let (status, body) = if !contains_webtransport_connect {
+        (404, format!("Not Found!"))
+    } else if client
+        .webtransport_sessions
+        .validate_new_webtransport_session(http3_conn)
+        .is_err()
+    {
+        (400, format!("Bad session configuration !"))
+    } else {
+        match &parsed_query {
+            &Some(InteropQuery::UniStreams((n_streams, size))) => {
+                let max_streams = 10;
+                let max_streams_size = 10000000;
+
+                let query_over_limit = n_streams > max_streams || size > max_streams_size;
+
+                if query_over_limit {
+                    (
+                        400,
+                        format!(
+                            "Query over limit ! Max uni streams = {}, max streams size = {}",
+                            max_streams, max_streams_size
+                        ),
+                    )
+                } else {
+                    match client.webtransport_sessions.pipe_h3_streams(http3_conn) {
+                        Ok(()) => {
+                            info!(
+                                "New session with ID {}: uni streams query, {} streams of {} bytes",
+                                stream_id, n_streams, size
+                            );
+                            process_uni_streams_query_with_data(
+                                n_streams,
+                                &random_payload[..size],
+                                stream_id,
+                                &mut client.interop_handler,
+                            );
+                            client.interop_handler.add_session_type(
+                                stream_id,
+                                InteropQuery::UniStreams((n_streams, size)),
+                            );
+                            (200, format!(""))
+                        }
+                        Err(_) => (500, format!("Internal error.")),
+                    }
+                }
+            }
+            Some(InteropQuery::EchoBidiStreams) => {
+                client
+                    .interop_handler
+                    .add_session_type(stream_id, InteropQuery::EchoBidiStreams);
+                match client
+                    .webtransport_sessions
+                    .pipe_h3_query_frames(http3_conn)
+                {
+                    Ok(()) => {
+                        info!("New session with ID {}: echo bidi streams query", stream_id);
+                        (200, format!(""))
+                    }
+                    Err(_) => (500, format!("Internal error.")),
+                }
+            }
+            None => (404, format!("Not found.")),
+        }
     };
 
     let max_streams = 10;
     let max_streams_size = 10000000;
 
-    let query_over_limit = match parsed_query {
-        Some((n_streams, size)) => n_streams > max_streams || size > max_streams_size,
-        None => false,
+    let query_over_limit = match &parsed_query {
+        &Some(InteropQuery::UniStreams((n_streams, size))) => {
+            n_streams > max_streams || size > max_streams_size
+        }
+        _ => false,
     };
 
-    let invalid_query = !contains_webtransport_connect || parsed_query.is_none() || query_over_limit;
+    let invalid_query =
+        !contains_webtransport_connect || parsed_query.is_none() || query_over_limit;
 
     // ignore non-webtransport queries
     if invalid_query {
-      conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-        .unwrap();
+        conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+            .unwrap();
     }
-    
 
-    // TODO
-    let (status, body) = if !invalid_query && client.webtransport_sessions.validate_new_webtransport_session(http3_conn).is_ok() {
-        client.webtransport_sessions.pipe_h3_streams(http3_conn).unwrap();
-        (200, Vec::new())
-    } else if query_over_limit {
-        (400, format!("Query over limit ! Max uni streams = {}, max streams size = {}", max_streams, max_streams_size).as_bytes().to_vec())
-    } else if invalid_query {
-        (400, b"Invalid query!".to_vec())
-    } else {
-        (404, b"Not Found!".to_vec())
-    };
+    let body = body.into_bytes();
 
-    if status == 200 {
-        if let Some((n_streams, size)) = parsed_query {
-            process_connect_query_with_data(n_streams, &random_payload[..size], stream_id, &mut client.interop_handler);
-        }
-    }
     let headers = if status == 200 {
         build_connect_response(status, &body)
     } else {
         build_response(status, &body)
-
     };
     match http3_conn.send_response(conn, stream_id, &headers, false) {
         Ok(v) => v,
@@ -695,12 +781,12 @@ fn handle_request(
 
             client.partial_responses.insert(stream_id, response);
             return;
-        },
+        }
 
         Err(e) => {
             error!("{} stream send failed {:?}", conn.trace_id(), e);
             return;
-        },
+        }
     }
 
     let fin = !((200..300).contains(&status) && contains_webtransport_connect);
@@ -713,7 +799,7 @@ fn handle_request(
         Err(e) => {
             error!("{} stream send failed {:?}", conn.trace_id(), e);
             return;
-        },
+        }
     };
 
     if written < body.len() {
@@ -728,7 +814,11 @@ fn handle_request(
     }
 }
 
-fn contains_webtransport_connect(request: &[quiche::h3::Header], regex: &Regex) -> (bool, Option<String>) {
+fn contains_webtransport_connect(
+    request: &[quiche::h3::Header],
+    regex_uni: &Regex,
+    regex_bidi: &Regex,
+) -> (bool, Option<String>) {
     let mut contains_connect = false;
     let mut contains_webtransport = false;
     let mut correct_path = false;
@@ -746,41 +836,34 @@ fn contains_webtransport_connect(request: &[quiche::h3::Header], regex: &Regex) 
         }
         if let b":path" = hdr.name() {
             let path = std::str::from_utf8(hdr.value()).unwrap();
-            if regex.is_match(path) {
+            if regex_uni.is_match(path) || regex_bidi.is_match(path) {
                 correct_path = true;
                 path_ret = Some(path.to_string());
             }
         }
     }
-    (contains_connect && contains_webtransport && correct_path, path_ret)
+    (
+        contains_connect && contains_webtransport && correct_path,
+        path_ret,
+    )
 }
 
 /// Builds an HTTP/3 response given a request.
-fn build_response(
-    status: u64, body: &Vec<u8>,
-) -> Vec<quiche::h3::Header> {
+fn build_response(status: u64, body: &Vec<u8>) -> Vec<quiche::h3::Header> {
     vec![
         quiche::h3::Header::new(b":status", status.to_string().as_bytes()),
         quiche::h3::Header::new(b"server", b"quiche"),
-        quiche::h3::Header::new(
-            b"content-length",
-            body.len().to_string().as_bytes(),
-        ),
+        quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
     ]
 }
 
 /// Builds an HTTP/3 response given a request.
-fn build_connect_response(
-    status: u64, body: &Vec<u8>,
-) -> Vec<quiche::h3::Header> {
+fn build_connect_response(status: u64, body: &Vec<u8>) -> Vec<quiche::h3::Header> {
     vec![
         quiche::h3::Header::new(b":status", status.to_string().as_bytes()),
         quiche::h3::Header::new(b"server", b"quiche"),
         quiche::h3::Header::new(b"sec-webtransport-http3-draft", b"draft02"),
-        quiche::h3::Header::new(
-            b"content-length",
-            body.len().to_string().as_bytes(),
-        ),
+        quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
     ]
 }
 
@@ -803,12 +886,12 @@ fn handle_writable(client: &mut Client, stream_id: u64) {
 
             Err(quiche::h3::Error::StreamBlocked) => {
                 return;
-            },
+            }
 
             Err(e) => {
                 error!("{} stream send failed {:?}", conn.trace_id(), e);
                 return;
-            },
+            }
         }
     }
 
@@ -826,7 +909,7 @@ fn handle_writable(client: &mut Client, stream_id: u64) {
 
             error!("{} stream send failed {:?}", conn.trace_id(), e);
             return;
-        },
+        }
     };
 
     resp.written += written;
