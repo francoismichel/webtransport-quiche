@@ -16,6 +16,7 @@ pub fn add(left: usize, right: usize) -> usize {
 #[derive(Debug)]
 pub enum Error {
     H3Error(quiche::h3::Error),
+    Done,
     BadH3Settings,
     CouldNotEstablishSession,
     MissingCapacityForOpeningStream,
@@ -116,6 +117,10 @@ impl Sessions {
         }
     }
 
+    pub fn session_id(&self, stream_id: u64) -> Option<u64> {
+        self.stream_id_to_session_id.get(&stream_id).copied()
+    }
+
     pub fn is_stream_readable(
         &mut self,
         _h3_conn: &mut quiche::h3::Connection,
@@ -175,7 +180,7 @@ impl Sessions {
         h3_stream_id: u64,
         h3_conn: &mut quiche::h3::Connection,
         conn: &mut quiche::Connection,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<u64>, Error> {
         let sid = match self.stream_id_to_session_id.get(&h3_stream_id) {
             Some(&session_id) => {
                 Some(session_id)
@@ -199,7 +204,7 @@ impl Sessions {
                         )?;
                         if read == 0 {
                             // could not read the first session ID's byte
-                            return Ok(());
+                            return Ok(None);
                         }
                         partial_session_id.received_len += 1;
                         self.partial_session_ids
@@ -231,7 +236,7 @@ impl Sessions {
         if let Some(session_id) = sid {
             self.set_readable_state(h3_stream_id, session_id, true);
         }
-        Ok(())
+        Ok(sid)
     }
 
     pub fn open_uni_stream(
@@ -259,6 +264,32 @@ impl Sessions {
         Ok(stream_id)
     }
 
+    pub fn open_bidi_stream(
+        &mut self,
+        conn: &mut quiche::Connection,
+        h3_conn: &mut quiche::h3::Connection,
+        session_id: u64,
+    ) -> Result<u64, Error> {
+        let stream_id =
+            h3_conn.open_application_pipe_frame_on_request_stream(conn, WEBTRANSPORT_BIDI_FRAME_TYPE)?;
+        let mut data = [0u8; 8];
+        let mut buf = octets::OctetsMut::with_slice(&mut data);
+        buf.put_varint(session_id).unwrap();
+        let data = buf.buf();
+        let written = h3_conn.send_application_pipe_stream_data(
+            conn,
+            stream_id,
+            &data[..buf.off()],
+            false,
+        )?;
+        if written != buf.off() {
+            return Err(Error::MissingCapacityForOpeningStream);
+        }
+        self.stream_id_to_session_id.insert(stream_id, session_id);
+        Ok(stream_id)
+    }
+
+
     pub fn stream_write(
         &mut self,
         conn: &mut quiche::Connection,
@@ -283,7 +314,7 @@ impl Sessions {
                 Ok(read) => Ok(read),
                 Err(quiche::h3::Error::Done) => {
                     self.set_readable_state(stream_id, session_id, false);
-                    Err(Error::H3Error(quiche::h3::Error::Done))
+                    Err(Error::Done)
                 }
                 Err(e) => Err(Error::H3Error(e)),
             },
