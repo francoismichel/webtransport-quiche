@@ -565,8 +565,8 @@ impl DummyWebTransportClient {
         Ok(self.webtransport_sessions.stream_write(&mut self.conn, &mut self.h3_conn, stream_id, data, fin)?)
     }
 
-    pub fn open_uni_stream(&mut self, session_id: u64) -> Result<u64, Error> {
-        Ok(self.webtransport_sessions.open_uni_stream(&mut self.conn, &mut self.h3_conn, session_id)?)
+    pub fn open_uni_stream(&mut self) -> Result<u64, Error> {
+        Ok(self.webtransport_sessions.open_uni_stream(&mut self.conn, &mut self.h3_conn, self.session_id)?)
     }
 
     pub fn open_bidi_stream(&mut self) -> Result<u64, Error> {
