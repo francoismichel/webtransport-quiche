@@ -118,7 +118,7 @@ fn main() {
     let mut sent_bytes_stream_id = Vec::new();
     let mut total_received = 0;
     loop {
-        match server.listen() {
+        match server.listen(None) {
             Ok(Some(cid)) => {
                 loop {
                     match server.poll(&cid, &regexes) {

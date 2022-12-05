@@ -452,7 +452,7 @@ impl DummyWebTransportClient {
         Ok(Event::Done)
     }
 
-    pub fn wait_for_events(&mut self) -> Result<(), Error> {
+    pub fn wait_for_events(&mut self, timeout: Option<std::time::Duration>) -> Result<(), Error> {
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
         loop {
@@ -491,8 +491,17 @@ impl DummyWebTransportClient {
             return Err(Error::ConnectionClosed(self.conn.peer_error().cloned()));
         }
 
+        let to = if let Some(t) = timeout {
+            if let Some(conn_timeout) = self.conn.timeout() {
+                Some(std::cmp::min(conn_timeout, t))
+            } else {
+                Some(t)
+            }
+        } else {
+            self.conn.timeout()
+        };
 
-        self.poll.poll(&mut self.events, self.conn.timeout())?;
+        self.poll.poll(&mut self.events, to)?;
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
@@ -805,7 +814,7 @@ impl DummyWebTransportServer {
         }
     }
 
-    pub fn listen(&mut self) -> Result<Option<Vec<u8>>, Error> {
+    pub fn listen(&mut self, timeout: Option<std::time::Duration>) -> Result<Option<Vec<u8>>, Error> {
         loop {
 
             // Generate outgoing QUIC packets for all active connections and send
@@ -867,11 +876,21 @@ impl DummyWebTransportServer {
             // Find the shorter timeout from all the active connections.
             //
             // TODO: use event loop that properly supports timers
-            let timeout = self.clients.values().filter_map(|c| c.conn.timeout()).min();
+            let client_timeout = self.clients.values().filter_map(|c| c.conn.timeout()).min();
+
+            let to = if let Some(t) = timeout {
+                if let Some(client_timeout) = client_timeout {
+                    Some(std::cmp::min(client_timeout, t))
+                } else {
+                    Some(t)
+                }
+            } else {
+                client_timeout
+            };
             // if there are still packets to process on the mio socket (that is non-blocking), process them, otherwise do a poll
             match self.socket.peek(&mut self.buf[..0]) {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.poll.poll(&mut self.events, timeout).unwrap();
+                    self.poll.poll(&mut self.events, to).unwrap();
                 }
                 _ => {
                     trace!("No need to poll, there are still packets to process from the mio socket.")

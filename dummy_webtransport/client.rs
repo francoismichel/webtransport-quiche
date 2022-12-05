@@ -144,7 +144,7 @@ fn main() {
         for (written, stream_id) in &sent_bytes_stream_id {
             sent_data_for_stream(&mut buffered_data, *stream_id, *written);
         }
-        match client.wait_for_events() {
+        match client.wait_for_events(None) {
             Ok(()) => (),
             Err(dummy_webtransport_handler::Error::ConnectionClosed(Some(peer_error))) => {
                 info!("Connection closed, peer error: {:?}", peer_error);
