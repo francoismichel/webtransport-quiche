@@ -394,7 +394,7 @@ fn main() {
 
                 client
                     .webtransport_sessions
-                    .configure_h3_for_webtransport(&mut h3_config);
+                    .configure_h3_for_webtransport(&mut h3_config).unwrap();
 
                 clients.insert(scid.clone(), client);
 
@@ -457,10 +457,6 @@ fn main() {
                 // Process HTTP/3 events.
                 loop {
                     let mut http3_conn = client.http3_conn.as_mut().unwrap();
-                    client
-                        .webtransport_sessions
-                        .pipe_h3_streams(&mut http3_conn)
-                        .unwrap();
                     match client.interop_handler.handle(
                         &mut client.webtransport_sessions,
                         &mut http3_conn,
@@ -514,7 +510,7 @@ fn main() {
 
                         Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
 
-                        Ok((stream_id, quiche::h3::Event::ApplicationPipeData(_))) => {
+                        Ok((stream_id, quiche::h3::Event::PassthroughData(_))) => {
                             if let Err(e) = client.webtransport_sessions.available_h3_stream_data(
                                 stream_id,
                                 http3_conn,
@@ -701,42 +697,29 @@ fn handle_request(
                         ),
                     )
                 } else {
-                    match client.webtransport_sessions.pipe_h3_streams(http3_conn) {
-                        Ok(()) => {
-                            info!(
-                                "New session with ID {}: uni streams query, {} streams of {} bytes",
-                                stream_id, n_streams, size
-                            );
-                            process_uni_streams_query_with_data(
-                                n_streams,
-                                &random_payload[..size],
-                                stream_id,
-                                &mut client.interop_handler,
-                            );
-                            client.interop_handler.add_session_type(
-                                stream_id,
-                                InteropQuery::UniStreams((n_streams, size)),
-                            );
-                            (200, format!(""))
-                        }
-                        Err(_) => (500, format!("Internal error.")),
-                    }
+                    info!(
+                        "New session with ID {}: uni streams query, {} streams of {} bytes",
+                        stream_id, n_streams, size
+                    );
+                    process_uni_streams_query_with_data(
+                        n_streams,
+                        &random_payload[..size],
+                        stream_id,
+                        &mut client.interop_handler,
+                    );
+                    client.interop_handler.add_session_type(
+                        stream_id,
+                        InteropQuery::UniStreams((n_streams, size)),
+                    );
+                    (200, format!(""))
                 }
             }
             Some(InteropQuery::EchoBidiStreams) => {
                 client
                     .interop_handler
                     .add_session_type(stream_id, InteropQuery::EchoBidiStreams);
-                match client
-                    .webtransport_sessions
-                    .pipe_h3_query_frames(http3_conn)
-                {
-                    Ok(()) => {
                         info!("New session with ID {}: echo bidi streams query", stream_id);
-                        (200, format!(""))
-                    }
-                    Err(_) => (500, format!("Internal error.")),
-                }
+                (200, format!(""))
             }
             None => (404, format!("Not found.")),
         }

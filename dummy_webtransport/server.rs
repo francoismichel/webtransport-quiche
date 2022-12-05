@@ -118,59 +118,65 @@ fn main() {
     let mut sent_bytes_stream_id = Vec::new();
     let mut total_received = 0;
     loop {
-        let cid = server.listen().unwrap();
-        loop {
-            match server.poll(&cid, &regexes) {
-                Ok(dummy_webtransport_handler::Event::NewSession(path, _regex_index)) => info!("New webtransport session on {}", path),
-                Ok(dummy_webtransport_handler::Event::StreamData(session_id, stream_id)) => {
-                    info!("New webtransport data on session {}, stream {}", session_id, stream_id);
-                    loop {
-                        let (read, fin) = match server.read(&cid, session_id, stream_id, &mut buffer) {
-                            Ok(r) => (r, false),
-                            Err(dummy_webtransport_handler::Error::Done) => (0, false),
-                            Err(dummy_webtransport_handler::Error::Finished) => (0, true),
-                            Err(e) => Err(e).unwrap(),
-                        };
-                        buffer_data_for_client(&mut clients_buffered_data, cid.clone(), stream_id, &buffer[..read], fin);
-                        total_received += read;
-                        if read > 0 || fin {
-                            info!("received: \"{}\", fin={}", String::from_utf8_lossy(&buffer[..read]), fin);
+        match server.listen() {
+            Ok(Some(cid)) => {
+                loop {
+                    match server.poll(&cid, &regexes) {
+                        Ok(dummy_webtransport_handler::Event::NewSession(path, _regex_index)) => info!("New webtransport session on {}", path),
+                        Ok(dummy_webtransport_handler::Event::StreamData(session_id, stream_id)) => {
+                            info!("New webtransport data on session {}, stream {}", session_id, stream_id);
+                            loop {
+                                let (read, fin) = match server.read(&cid, session_id, stream_id, &mut buffer) {
+                                    Ok(r) => (r, false),
+                                    Err(dummy_webtransport_handler::Error::Done) => (0, false),
+                                    Err(dummy_webtransport_handler::Error::Finished) => (0, true),
+                                    Err(e) => Err(e).unwrap(),
+                                };
+                                buffer_data_for_client(&mut clients_buffered_data, cid.clone(), stream_id, &buffer[..read], fin);
+                                total_received += read;
+                                if read > 0 || fin {
+                                    info!("received: \"{}\", fin={}", String::from_utf8_lossy(&buffer[..read]), fin);
+                                }
+                                if fin {
+                                    info!("total received = {}", total_received);
+                                }
+                                if read == 0 {
+                                    break;
+                                }
+                            }
                         }
-                        if fin {
-                            info!("total received = {}", total_received);
-                        }
-                        if read == 0 {
+                        Ok(dummy_webtransport_handler::Event::GoAway) => {
+                            info!("A client closed its connection");
                             break;
                         }
+                        Ok(dummy_webtransport_handler::Event::Done) => break,
+                        Err(e) => error!("error encountered: {:?}", e),
                     }
                 }
-                Ok(dummy_webtransport_handler::Event::GoAway) => {
-                    info!("A client closed its connection");
-                    break;
-                }
-                Ok(dummy_webtransport_handler::Event::Done) => break,
-                Err(e) => error!("error encountered: {:?}", e),
-            }
-        }
-        // then, flush the buffered data
-        sent_bytes_stream_id.clear();
-        match clients_buffered_data.get_mut(&cid) {
-            Some(buffered_data_for_client) => {
-                for (&stream_id, buffered_data) in buffered_data_for_client.iter_mut() {
-                    let data_to_send = &buffered_data.data[buffered_data.sent..];
-                    match server.write(&cid, stream_id, data_to_send, buffered_data.fin) {
-                        Ok(written) => {
-                            sent_bytes_stream_id.push((written, stream_id));
+                // then, flush the buffered data
+                sent_bytes_stream_id.clear();
+                match clients_buffered_data.get_mut(&cid) {
+                    Some(buffered_data_for_client) => {
+                        for (&stream_id, buffered_data) in buffered_data_for_client.iter_mut() {
+                            let data_to_send = &buffered_data.data[buffered_data.sent..];
+                            match server.write(&cid, stream_id, data_to_send, buffered_data.fin) {
+                                Ok(written) => {
+                                    sent_bytes_stream_id.push((written, stream_id));
+                                }
+                                Err(dummy_webtransport_handler::Error::Done) => (),
+                                Err(e) => Err(e).unwrap(),
+                            }
                         }
-                        Err(dummy_webtransport_handler::Error::Done) => (),
-                        Err(e) => Err(e).unwrap(),
                     }
+                    None => (),
+                };
+                for (written, stream_id) in &sent_bytes_stream_id {
+                    sent_data_for_client(&mut clients_buffered_data, &cid, *stream_id, *written);
                 }
             }
-            None => (),
-        };
-        for (written, stream_id) in &sent_bytes_stream_id {
-            sent_data_for_client(&mut clients_buffered_data, &cid, *stream_id, *written);
+            Err(e) => error!("error while listening: {:?}", e),
+            Ok(None) => (),
+
         }
     }
 }

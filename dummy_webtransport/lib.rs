@@ -92,14 +92,16 @@ pub struct DummyWebTransportClient {
 
 impl DummyWebTransportClient {
 
-    pub fn connect(url: url::Url, mut quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<DummyWebTransportClient, Error> {
+    pub fn connect(url: url::Url, mut quic_config: quiche::Config, mut h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<DummyWebTransportClient, Error> {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
+
+        
 
         // Setup the event loop.
         let mut poll = mio::Poll::new().unwrap();
         let mut events = mio::Events::with_capacity(1024);
-    
+
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind("0.0.0.0:0".parse()?)?;
         poll.registry()
@@ -121,7 +123,8 @@ impl DummyWebTransportClient {
 
         let mut http3_conn = None;
         let mut webtransport_session_id = None;
-        let mut webtransport_sessions = webtransport_quiche::Sessions::new(false);
+        let webtransport_sessions = webtransport_quiche::Sessions::new(false);
+        webtransport_sessions.configure_h3_for_webtransport(&mut h3_config)?;
 
         // Create a QUIC connection and initiate handshake.
         let mut conn =
@@ -229,11 +232,9 @@ impl DummyWebTransportClient {
 
             // Create a new HTTP/3 connection once the QUIC connection is established.
             if conn.is_established() && http3_conn.is_none() {
-                let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
+                let h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size");
                 
-                webtransport_sessions.pipe_h3_streams(&mut h3_conn)?;
-                webtransport_sessions.pipe_h3_query_frames(&mut h3_conn)?;
                 http3_conn = Some(h3_conn);
             }
 
@@ -309,7 +310,7 @@ impl DummyWebTransportClient {
                             info!("GOAWAY id={}", goaway_id);
                         },
 
-                        Ok((_, quiche::h3::Event::ApplicationPipeData(_))) =>
+                        Ok((_, quiche::h3::Event::PassthroughData(_))) =>
                             unreachable!(),
 
                         Err(quiche::h3::Error::Done) => {
@@ -426,7 +427,7 @@ impl DummyWebTransportClient {
                     return Ok(Event::GoAway);
                 },
 
-                Ok((stream_id, quiche::h3::Event::ApplicationPipeData(_))) => {
+                Ok((stream_id, quiche::h3::Event::PassthroughData(_))) => {
                     match self.webtransport_sessions.available_h3_stream_data(
                         stream_id,
                         &mut self.h3_conn,
@@ -788,6 +789,8 @@ impl DummyWebTransportServer {
         let rng = SystemRandom::new();
         let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
+        
+
         DummyWebTransportServer {
             buf: [0; 65535],
             dgrams_buf: [0; MAX_DATAGRAM_SIZE],
@@ -802,7 +805,7 @@ impl DummyWebTransportServer {
         }
     }
 
-    pub fn listen(&mut self) -> Option<Vec<u8>> {
+    pub fn listen(&mut self) -> Result<Option<Vec<u8>>, Error> {
         loop {
 
             // Generate outgoing QUIC packets for all active connections and send
@@ -1029,7 +1032,7 @@ impl DummyWebTransportServer {
 
                     client
                         .webtransport_sessions
-                        .configure_h3_for_webtransport(&mut self.h3_config);
+                        .configure_h3_for_webtransport(&mut self.h3_config)?;
 
                     self.clients.insert(scid.clone(), client);
 
@@ -1069,7 +1072,7 @@ impl DummyWebTransportServer {
                         client.conn.trace_id()
                     );
 
-                    let mut h3_conn =
+                    let h3_conn =
                         match quiche::h3::Connection::with_transport(&mut client.conn, &self.h3_config) {
                             Ok(v) => v,
 
@@ -1078,8 +1081,6 @@ impl DummyWebTransportServer {
                                 continue 'read;
                             }
                         };
-                    client.webtransport_sessions.pipe_h3_streams(&mut h3_conn).unwrap();
-                    client.webtransport_sessions.pipe_h3_query_frames(&mut h3_conn).unwrap();
                     // TODO: sanity check h3 connection before adding to map
                     client.http3_conn = Some(h3_conn);
                 }
@@ -1090,7 +1091,7 @@ impl DummyWebTransportServer {
                         handle_writable(client, stream_id);
                     }
 
-                    return Some(client.conn.source_id().to_vec());
+                    return Ok(Some(client.conn.source_id().to_vec()));
                 }
             }
         }
@@ -1189,7 +1190,7 @@ impl DummyWebTransportServer {
                     return Ok(Event::GoAway);
                 },
 
-                Ok((stream_id, quiche::h3::Event::ApplicationPipeData(_))) => {
+                Ok((stream_id, quiche::h3::Event::PassthroughData(_))) => {
                     info!("Application pipe data on stream {}!", stream_id);
                     match client.webtransport_sessions.available_h3_stream_data(
                         stream_id,

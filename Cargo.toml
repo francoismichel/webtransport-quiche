@@ -7,8 +7,7 @@ edition = "2021"
 
 [dependencies]
 # quiche = "0.16.0"
-# quiche = {git = "https://github.com/francoismichel/quiche"}
-quiche = {path = "../quiche-webtransport/quiche"}
+quiche = {git = "https://github.com/francoismichel/quiche", rev = "330b24e2f01ac4e16313154f753a9228cd9e1061"}
 octets = "0.2.0"
 log = "0.4.17"
 mio = { version = "0.8", features = ["net", "os-poll"] }

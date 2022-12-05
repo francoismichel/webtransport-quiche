@@ -71,18 +71,18 @@ impl Sessions {
         }
     }
 
-    pub fn pipe_h3_streams(&mut self, h3_conn: &mut quiche::h3::Connection) -> Result<(), Error> {
-        Ok(h3_conn.set_piped_stream_types(HashSet::from([WEBTRANSPORT_UNI_STREAM_TYPE]))?)
+    pub fn pipe_h3_streams(&self, config: &mut quiche::h3::Config) -> Result<(), Error> {
+        Ok(config.set_passthrough_stream_types(HashSet::from([WEBTRANSPORT_UNI_STREAM_TYPE]))?)
     }
 
     pub fn pipe_h3_query_frames(
-        &mut self,
-        h3_conn: &mut quiche::h3::Connection,
+        &self,
+        config: &mut quiche::h3::Config,
     ) -> Result<(), Error> {
-        Ok(h3_conn.set_piped_query_frame_types(HashSet::from([WEBTRANSPORT_BIDI_FRAME_TYPE]))?)
+        Ok(config.set_passthrough_query_frame_types(HashSet::from([WEBTRANSPORT_BIDI_FRAME_TYPE]))?)
     }
 
-    pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) {
+    pub fn configure_h3_for_webtransport(&self, h3_config: &mut quiche::h3::Config) -> Result<(), Error> {
         // enable_webtransport settings
         let additional_settings = if self.google_chrome_compatible {
             // H3_SETTING_ENABLE_CONNECT_PROTOCOL not needed but sent by chromium
@@ -94,6 +94,13 @@ impl Sessions {
             vec![H3_SETTING_ENABLE_WEBTRANSPORT]
         };
         h3_config.set_additional_settings(additional_settings);
+        
+        self
+        .pipe_h3_streams(h3_config)?;
+        
+        self
+        .pipe_h3_query_frames(h3_config)?;
+        Ok(())
     }
 
     pub fn validate_new_webtransport_session(
@@ -246,12 +253,12 @@ impl Sessions {
         session_id: u64,
     ) -> Result<u64, Error> {
         let stream_id =
-            h3_conn.open_application_pipe_uni_stream(conn, WEBTRANSPORT_UNI_STREAM_TYPE)?;
+            h3_conn.open_passthrough_uni_stream(conn, WEBTRANSPORT_UNI_STREAM_TYPE)?;
         let mut data = [0u8; 8];
         let mut buf = octets::OctetsMut::with_slice(&mut data);
         buf.put_varint(session_id).unwrap();
         let data = buf.buf();
-        let written = h3_conn.send_application_pipe_stream_data(
+        let written = h3_conn.send_passthrough_stream_data(
             conn,
             stream_id,
             &data[..buf.off()],
@@ -271,12 +278,12 @@ impl Sessions {
         session_id: u64,
     ) -> Result<u64, Error> {
         let stream_id =
-            h3_conn.open_application_pipe_frame_on_request_stream(conn, WEBTRANSPORT_BIDI_FRAME_TYPE)?;
+            h3_conn.open_passthrough_frame_on_request_stream(conn, WEBTRANSPORT_BIDI_FRAME_TYPE)?;
         let mut data = [0u8; 8];
         let mut buf = octets::OctetsMut::with_slice(&mut data);
         buf.put_varint(session_id).unwrap();
         let data = buf.buf();
-        let written = h3_conn.send_application_pipe_stream_data(
+        let written = h3_conn.send_passthrough_stream_data(
             conn,
             stream_id,
             &data[..buf.off()],
@@ -298,7 +305,7 @@ impl Sessions {
         data: &[u8],
         fin: bool,
     ) -> Result<usize, Error> {
-        Ok(h3_conn.send_application_pipe_stream_data(conn, stream_id, data, fin)?)
+        Ok(h3_conn.send_passthrough_stream_data(conn, stream_id, data, fin)?)
     }
 
     pub fn stream_recv(
