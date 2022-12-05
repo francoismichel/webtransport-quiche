@@ -6,7 +6,7 @@ use log::{error, info};
 use regex::Regex;
 
 struct BufferedData {
-    stream_id: u64,
+    _stream_id: u64,
     data: Vec<u8>,
     sent: usize,
     fin: bool,
@@ -46,7 +46,7 @@ fn buffer_data_for_client(clients_buffered_data: &mut HashMap<Vec<u8>, HashMap<u
     let buffered_data = match data_for_client.get_mut(&stream_id) {
         Some(bd) => bd,
         None => {
-            data_for_client.insert(stream_id, BufferedData { stream_id: stream_id, data: Vec::new(), sent: 0, fin: fin });
+            data_for_client.insert(stream_id, BufferedData { _stream_id: stream_id, data: Vec::new(), sent: 0, fin: fin });
             data_for_client.get_mut(&stream_id).unwrap()
         }
     };
@@ -98,7 +98,7 @@ fn main() {
     quic_config.enable_early_data();
     quic_config.grease(false);
 
-    let mut h3_config = quiche::h3::Config::new().unwrap();
+    let h3_config = quiche::h3::Config::new().unwrap();
     
     let keylog = if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
         let file = std::fs::OpenOptions::new()
@@ -117,7 +117,6 @@ fn main() {
     let regexes = [Regex::new("/test").unwrap()];
     let mut sent_bytes_stream_id = Vec::new();
     let mut total_received = 0;
-    let mut total_written = 0;
     loop {
         let cid = server.listen().unwrap();
         loop {

@@ -29,26 +29,19 @@ extern crate log;
 
 use mio::net::UdpSocket;
 use quiche::ConnectionId;
-use rand::Rng;
-use url::Url;
 
 use std::fs::File;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use ring::rand::*;
 
-use quiche::h3::{NameValue, self};
+use quiche::h3::NameValue;
 use regex::Regex;
 
-use docopt::Docopt;
-
 const MAX_DATAGRAM_SIZE: usize = 1350;
-
-const MAX_STREAM_SIZE: usize = 50000000;
 
 struct H3Client {
     conn: quiche::Connection,
@@ -88,12 +81,9 @@ pub struct DummyWebTransportServer {
 pub struct DummyWebTransportClient {
     buf: [u8; 65535],
     dgrams_buf: [u8; MAX_DATAGRAM_SIZE],
-    quic_config: quiche::Config,
-    h3_config: quiche::h3::Config,
     socket: UdpSocket,
     poll: mio::Poll,
     events: mio::Events,
-    keylog: Option<File>,
     conn: quiche::Connection,
     h3_conn: quiche::h3::Connection,
     webtransport_sessions: webtransport_quiche::Sessions,
@@ -102,7 +92,7 @@ pub struct DummyWebTransportClient {
 
 impl DummyWebTransportClient {
 
-    pub fn connect(url: url::Url, mut quic_config: quiche::Config, mut h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<DummyWebTransportClient, Error> {
+    pub fn connect(url: url::Url, mut quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<DummyWebTransportClient, Error> {
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -113,19 +103,9 @@ impl DummyWebTransportClient {
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind("0.0.0.0:0".parse()?)?;
         poll.registry()
-            .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-            .unwrap();
+            .register(&mut socket, mio::Token(0), mio::Interest::READABLE)?;
     
         // Create the configuration for the QUIC connections.
-    
-        let mut keylog = None;
-    
-        let rng = SystemRandom::new();
-        let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-    
-        let mut clients = ClientMap::new();
-    
-        let local_addr = socket.local_addr()?;
 
         // Generate a random source connection ID for the connection.
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
@@ -137,7 +117,7 @@ impl DummyWebTransportClient {
         let local_addr = socket.local_addr()?;
 
         // Resolve server address.
-        let peer_addr = url.to_socket_addrs().unwrap().next().unwrap();
+        let peer_addr = url.to_socket_addrs()?.next().unwrap();
 
         let mut http3_conn = None;
         let mut webtransport_session_id = None;
@@ -145,13 +125,18 @@ impl DummyWebTransportClient {
 
         // Create a QUIC connection and initiate handshake.
         let mut conn =
-            quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut quic_config)
-                .unwrap();
+            quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut quic_config)?;
+
+        if let Some(keylog) = keylog {
+            if let Ok(keylog) = keylog.try_clone() {
+                conn.set_keylog(Box::new(keylog));
+            }
+        }
 
         info!(
             "connecting to {:} from {:} with scid {}",
             url,
-            socket.local_addr().unwrap(),
+            socket.local_addr()?,
             hex_dump(&scid)
         );
 
@@ -247,8 +232,8 @@ impl DummyWebTransportClient {
                 let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                     .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size");
                 
-                webtransport_sessions.pipe_h3_streams(&mut h3_conn).unwrap();
-                webtransport_sessions.pipe_h3_query_frames(&mut h3_conn).unwrap();
+                webtransport_sessions.pipe_h3_streams(&mut h3_conn)?;
+                webtransport_sessions.pipe_h3_query_frames(&mut h3_conn)?;
                 http3_conn = Some(h3_conn);
             }
 
@@ -277,7 +262,7 @@ impl DummyWebTransportClient {
                                 let mut status_ok = false;
                                 for hdr in list {
                                     if let b":status" = hdr.name() {
-                                        info!("response: status = {}", String::from_utf8(hdr.value().to_vec()).unwrap());
+                                        info!("response: status = {}", String::from_utf8(hdr.value().to_vec()).unwrap_or(format!("{:?}", hdr.value())));
                                         if hdr.value() == b"200" {
                                             status_ok = true;
                                         }
@@ -302,7 +287,7 @@ impl DummyWebTransportClient {
                         },
 
                         Ok((_stream_id, quiche::h3::Event::Finished)) => {
-                            conn.close(true, 0x00, b"kthxbye").unwrap();
+                            conn.close(true, 0x00, b"kthxbye")?;
                             return Err(Error::ConnectionClosed(None))
                         },
 
@@ -312,7 +297,7 @@ impl DummyWebTransportClient {
                                 e
                             );
 
-                            conn.close(true, 0x00, b"kthxbye").unwrap();
+                            conn.close(true, 0x00, b"kthxbye")?;
                             return Err(Error::ConnectionClosed(None));
                         },
 
@@ -386,12 +371,9 @@ impl DummyWebTransportClient {
             Ok(DummyWebTransportClient {
                 buf: buf,
                 dgrams_buf: out,
-                quic_config: quic_config,
-                h3_config: h3_config,
                 socket,
                 poll,
                 events,
-                keylog,
                 conn,
                 h3_conn,
                 webtransport_sessions,
@@ -509,7 +491,7 @@ impl DummyWebTransportClient {
         }
 
 
-        self.poll.poll(&mut self.events, self.conn.timeout()).unwrap();
+        self.poll.poll(&mut self.events, self.conn.timeout())?;
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
@@ -617,11 +599,12 @@ fn contains_webtransport_connect(
             }
         }
         if let b":path" = hdr.name() {
-            let path = std::str::from_utf8(hdr.value()).unwrap();
-            if let Some((idx, _)) = uri_regexes.iter().enumerate().find(|(_, re)| re.is_match(path)) {
-                correct_path = true;
-                path_ret = Some(path.to_string());
-                regex_idx_ret = Some(idx);
+            if let Ok(path) = std::str::from_utf8(hdr.value()) {
+                if let Some((idx, _)) = uri_regexes.iter().enumerate().find(|(_, re)| re.is_match(path)) {
+                    correct_path = true;
+                    path_ret = Some(path.to_string());
+                    regex_idx_ret = Some(idx);
+                }
             }
         }
     }
@@ -792,8 +775,8 @@ impl DummyWebTransportServer {
     pub fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> DummyWebTransportServer {
     
         // Setup the event loop.
-        let mut poll = mio::Poll::new().unwrap();
-        let mut events = mio::Events::with_capacity(1024);
+        let poll = mio::Poll::new().unwrap();
+        let events = mio::Events::with_capacity(1024);
     
         // Create the UDP listening socket, and register it with the event loop.
         let mut socket = mio::net::UdpSocket::bind(addr).unwrap();
@@ -820,7 +803,7 @@ impl DummyWebTransportServer {
     }
 
     pub fn listen(&mut self) -> Option<Vec<u8>> {
-        'poll: loop {
+        loop {
 
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
@@ -952,7 +935,11 @@ impl DummyWebTransportServer {
                     if !quiche::version_is_supported(hdr.version) {
                         warn!("Doing version negotiation");
 
-                        let len = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut self.dgrams_buf).unwrap();
+                        let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut self.dgrams_buf) {
+                            l
+                        } else {
+                            continue 'read;
+                        };
 
                         let out = &self.dgrams_buf[..len];
 
@@ -1110,7 +1097,7 @@ impl DummyWebTransportServer {
     }
 
     pub fn poll(&mut self, scid: &Vec<u8>, uri_regexes: &[Regex]) -> Result<Event, Error> {
-        let mut client = match self.clients.get_mut(&ConnectionId::from_vec(scid.clone())) {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(scid.clone())) {
             Some(c) => c,
             None => return Err(Error::ClientNotFound),
         };
@@ -1198,7 +1185,7 @@ impl DummyWebTransportServer {
                 Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => (),
 
                 Ok((_goaway_id, quiche::h3::Event::GoAway)) => {
-                    client.conn.close(true, 0, b"Received GO_AWAY");
+                    client.conn.close(true, 0, b"Received GO_AWAY")?;
                     return Ok(Event::GoAway);
                 },
 

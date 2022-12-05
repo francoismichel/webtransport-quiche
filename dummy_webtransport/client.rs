@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
 use docopt::Docopt;
-use dummy_webtransport_handler::{DummyWebTransportServer, DummyWebTransportClient};
+use dummy_webtransport_handler::DummyWebTransportClient;
 use log::{error, info};
 use rand::Rng;
-use regex::Regex;
 
 struct BufferedData {
-    stream_id: u64,
+    _stream_id: u64,
     data: Vec<u8>,
     sent: usize,
     fin: bool,
@@ -39,7 +38,7 @@ fn buffer_data_for_stream(buffered_data: &mut HashMap<u64, BufferedData>, stream
     let buffered_data_for_stream = match buffered_data.get_mut(&stream_id) {
         Some(bd) => bd,
         None => {
-            buffered_data.insert(stream_id, BufferedData { stream_id: stream_id, data: Vec::new(), sent: 0, fin: fin });
+            buffered_data.insert(stream_id, BufferedData { _stream_id: stream_id, data: Vec::new(), sent: 0, fin: fin });
             buffered_data.get_mut(&stream_id).unwrap()
         }
     };
@@ -66,7 +65,7 @@ fn main() {
         .and_then(|dopt| dopt.parse())
         .unwrap_or_else(|e| e.exit());
 
-    let mut payload = match args.get_str("--size").parse() {
+    let payload = match args.get_str("--size").parse() {
         Ok(s) => {
             let mut random_payload = vec![0; s];
             rand::thread_rng().fill(&mut random_payload[..]);
@@ -100,7 +99,7 @@ fn main() {
     quic_config.set_initial_max_streams_uni(100);
     quic_config.set_disable_active_migration(true);
 
-    let mut h3_config = quiche::h3::Config::new().unwrap();
+    let h3_config = quiche::h3::Config::new().unwrap();
     
     let keylog = if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
         let file = std::fs::OpenOptions::new()
@@ -113,6 +112,8 @@ fn main() {
     } else {
         None
     };
+
+    quic_config.log_keys();
 
     let url = args.get_str("<url>").parse().unwrap();
     let mut client = DummyWebTransportClient::connect(url, quic_config, h3_config, keylog).unwrap();
@@ -181,7 +182,7 @@ fn main() {
                                 println!("The received paylaod differs with the sent payload.")
                             }
                             info!("Closing.");
-                            client.close_session();
+                            client.close_session().unwrap();
                         }
                         if read == 0 {
                             break;
