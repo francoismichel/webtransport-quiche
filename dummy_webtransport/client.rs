@@ -5,6 +5,8 @@ use dummy_webtransport_handler::DummyWebTransportClient;
 use log::{error, info};
 use rand::Rng;
 
+use webtransport_quiche::quiche as quiche;
+
 struct BufferedData {
     _stream_id: u64,
     data: Vec<u8>,

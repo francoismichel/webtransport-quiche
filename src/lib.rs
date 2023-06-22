@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use octets;
-use quiche;
+pub extern crate quiche;
+pub extern crate mio;
 
 const WEBTRANSPORT_UNI_STREAM_TYPE: u64 = 0x54;
 const WEBTRANSPORT_BIDI_FRAME_TYPE: u64 = 0x41;

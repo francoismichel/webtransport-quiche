@@ -26,9 +26,12 @@
 
 #[macro_use]
 extern crate log;
+pub extern crate mio;
+pub use webtransport_quiche::quiche as quiche;
+
 
 use mio::net::UdpSocket;
-use quiche::ConnectionId;
+use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
 use std::io;
@@ -38,7 +41,7 @@ use std::collections::HashMap;
 
 use ring::rand::*;
 
-use quiche::h3::NameValue;
+use webtransport_quiche::quiche::h3::NameValue;
 use regex::Regex;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
