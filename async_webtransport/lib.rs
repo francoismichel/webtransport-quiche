@@ -39,6 +39,7 @@ use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use ring::rand::*;
 use thiserror::Error as Error;
@@ -1197,15 +1198,16 @@ impl AsyncWebTransportServer {
 
 }
 
-pub struct ServerRecvStream <'a> {
-    server: &'a mut AsyncWebTransportServer,
+type ServerRef = Arc<Mutex<AsyncWebTransportServer>>;
+pub struct ServerRecvStream {
+    server: ServerRef,
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
 }
 
-impl ServerRecvStream <'_> {
-    pub fn new(server: &mut AsyncWebTransportServer, connection_id: Vec<u8>, stream_id: u64, session_id: u64) -> ServerRecvStream {
+impl ServerRecvStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64, session_id: u64) -> ServerRecvStream {
         ServerRecvStream {
             server,
             stream_id,
@@ -1215,7 +1217,7 @@ impl ServerRecvStream <'_> {
     }
 }
 
-impl AsyncRead for ServerRecvStream<'_> {
+impl AsyncRead for ServerRecvStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
@@ -1223,7 +1225,9 @@ impl AsyncRead for ServerRecvStream<'_> {
     ) -> std::task::Poll<io::Result<()>> {
         
         let stream = self.get_mut();
-        match stream.server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
+
+        let mut server = stream.server.lock().unwrap();
+        match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
             Ok(read) => {
                 buf.advance(read);
                 std::task::Poll::Ready(Ok(()))
@@ -1240,20 +1244,21 @@ impl AsyncRead for ServerRecvStream<'_> {
     
 }
 
-pub struct ServerSendStream <'a> {
-    server: &'a mut AsyncWebTransportServer,
+pub struct ServerSendStream {
+    server: ServerRef,
     stream_id: u64,
     connection_id: Vec<u8>,
 }
 
-impl ServerSendStream <'_> {
+impl ServerSendStream {
     fn _poll_write(
         &mut self,
         _cx: &mut std::task::Context<'_>,
         buf: &[u8],
         fin: bool,
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        match self.server.write(&self.connection_id, self.stream_id, buf, fin) {
+        let mut server = self.server.lock().unwrap();
+        match server.write(&self.connection_id, self.stream_id, buf, fin) {
             Ok(read) => {
                 std::task::Poll::Ready(Ok(read))
             },
@@ -1264,7 +1269,7 @@ impl ServerSendStream <'_> {
         }
     }
 
-    pub fn new(server: &mut AsyncWebTransportServer, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
         ServerSendStream {
             server,
             stream_id,
@@ -1273,7 +1278,7 @@ impl ServerSendStream <'_> {
     }
 }
 
-impl AsyncWrite for ServerSendStream<'_> {
+impl AsyncWrite for ServerSendStream {
 
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
