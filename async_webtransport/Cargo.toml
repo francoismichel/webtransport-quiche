@@ -22,7 +22,7 @@ docopt = "1"
 thiserror = "1"
 
 [lib]
-name = "dummy_webtransport_handler"
+name = "async_webtransport_handler"
 path = "lib.rs"
 
 # [[bin]]
