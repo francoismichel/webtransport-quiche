@@ -671,8 +671,8 @@ fn handle_writable(client: &mut H3Client, stream_id: u64) {
 }
 
 pub enum Event {
-    /// HTTP3 uri path, matching regex index
-    NewSession(String, usize),
+    /// HTTP3 uri path, session_id, matching regex index
+    NewSession(String, u64, usize),
     /// session_id, stream_id
     StreamData(u64, u64),
     Done,
@@ -1082,7 +1082,7 @@ impl AsyncWebTransportServer {
                         }
                     }
                     if let (Some(p), Some(regex_idx)) = (path, matching_regex) {
-                        return Ok(Event::NewSession(p, regex_idx));
+                        return Ok(Event::NewSession(p, stream_id, regex_idx));
                     }
                 }
 
