@@ -1197,14 +1197,25 @@ impl AsyncWebTransportServer {
 
 }
 
-pub struct RecvStream <'a> {
+pub struct ServerRecvStream <'a> {
     server: &'a mut AsyncWebTransportServer,
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
 }
 
-impl AsyncRead for RecvStream<'_> {
+impl ServerRecvStream <'_> {
+    pub fn new(server: &mut AsyncWebTransportServer, stream_id: u64, session_id: u64, connection_id: Vec<u8>) -> ServerRecvStream {
+        ServerRecvStream {
+            server,
+            stream_id,
+            session_id,
+            connection_id,
+        }
+    }
+}
+
+impl AsyncRead for ServerRecvStream<'_> {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
@@ -1229,13 +1240,13 @@ impl AsyncRead for RecvStream<'_> {
     
 }
 
-pub struct SendStream <'a> {
+pub struct ServerSendStream <'a> {
     server: &'a mut AsyncWebTransportServer,
     stream_id: u64,
     connection_id: Vec<u8>,
 }
 
-impl SendStream <'_> {
+impl ServerSendStream <'_> {
     fn _poll_write(
         &mut self,
         _cx: &mut std::task::Context<'_>,
@@ -1252,9 +1263,17 @@ impl SendStream <'_> {
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
         }
     }
+
+    pub fn new(server: &mut AsyncWebTransportServer, stream_id: u64, connection_id: Vec<u8>) -> ServerSendStream {
+        ServerSendStream {
+            server,
+            stream_id,
+            connection_id,
+        }
+    }
 }
 
-impl AsyncWrite for SendStream<'_> {
+impl AsyncWrite for ServerSendStream<'_> {
 
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
