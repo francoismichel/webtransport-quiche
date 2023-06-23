@@ -1207,7 +1207,7 @@ pub struct ServerRecvStream {
 }
 
 impl ServerRecvStream {
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64, session_id: u64) -> ServerRecvStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerRecvStream {
         ServerRecvStream {
             server,
             stream_id,
