@@ -39,6 +39,8 @@ use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::collections::HashMap;
 
 use ring::rand::*;
+use thiserror::Error as Error;
+
 
 use webtransport_quiche::quiche::h3::NameValue;
 use regex::Regex;
@@ -676,7 +678,8 @@ pub enum Event {
     GoAway,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
+#[error("quiche webtransport error: {:?}", self)]
 pub enum Error {
     IOError(io::Error),
     QUICError(quiche::Error),

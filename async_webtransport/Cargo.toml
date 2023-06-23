@@ -19,6 +19,7 @@ env_logger = "0.9.3"
 rand = "0.8.5"
 regex = "1.7.0"
 docopt = "1"
+thiserror = "1"
 
 [lib]
 name = "dummy_webtransport_handler"
