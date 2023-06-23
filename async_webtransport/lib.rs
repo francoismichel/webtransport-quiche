@@ -28,6 +28,7 @@
 extern crate log;
 pub extern crate tokio;
 pub extern crate regex;
+use tokio::io::{AsyncRead, AsyncWrite};
 use webtransport_quiche::quiche as quiche;
 
 use tokio::net::UdpSocket;
@@ -1192,6 +1193,85 @@ impl AsyncWebTransportServer {
             None => return Err(Error::ClientNotFound),
         };
         Ok(client.conn.close(true, 0, b"session closed by the application")?)
+    }
+
+}
+
+pub struct RecvStream <'a> {
+    server: &'a mut AsyncWebTransportServer,
+    stream_id: u64,
+    session_id: u64,
+    connection_id: Vec<u8>,
+}
+
+impl AsyncRead for RecvStream<'_> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        
+        let stream = self.get_mut();
+        match stream.server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
+            Ok(read) => {
+                buf.advance(read);
+                std::task::Poll::Ready(Ok(()))
+            },
+            Err(Error::Finished) => {
+                std::task::Poll::Ready(Ok(()))
+            },
+            Err(Error::Done) => {
+                std::task::Poll::Pending
+            }
+            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
+        }
+    }
+    
+}
+
+pub struct SendStream <'a> {
+    server: &'a mut AsyncWebTransportServer,
+    stream_id: u64,
+    connection_id: Vec<u8>,
+}
+
+impl SendStream <'_> {
+    fn _poll_write(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+        fin: bool,
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        match self.server.write(&self.connection_id, self.stream_id, buf, fin) {
+            Ok(read) => {
+                std::task::Poll::Ready(Ok(read))
+            },
+            Err(Error::Done) => {
+                std::task::Poll::Pending
+            }
+            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
+        }
+    }
+}
+
+impl AsyncWrite for SendStream<'_> {
+
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        let stream = self.get_mut();
+        stream._poll_write(cx, buf, false)
+    }
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        let stream = self.get_mut();
+        stream._poll_write(cx, &[], true).map_ok(|_| ())
     }
 }
 
