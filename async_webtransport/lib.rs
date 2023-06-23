@@ -1205,7 +1205,7 @@ pub struct ServerRecvStream <'a> {
 }
 
 impl ServerRecvStream <'_> {
-    pub fn new(server: &mut AsyncWebTransportServer, stream_id: u64, session_id: u64, connection_id: Vec<u8>) -> ServerRecvStream {
+    pub fn new(server: &mut AsyncWebTransportServer, connection_id: Vec<u8>, stream_id: u64, session_id: u64) -> ServerRecvStream {
         ServerRecvStream {
             server,
             stream_id,
@@ -1264,7 +1264,7 @@ impl ServerSendStream <'_> {
         }
     }
 
-    pub fn new(server: &mut AsyncWebTransportServer, stream_id: u64, connection_id: Vec<u8>) -> ServerSendStream {
+    pub fn new(server: &mut AsyncWebTransportServer, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
         ServerSendStream {
             server,
             stream_id,
