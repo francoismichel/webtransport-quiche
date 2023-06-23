@@ -27,6 +27,7 @@
 #[macro_use]
 extern crate log;
 pub extern crate tokio;
+pub extern crate regex;
 use webtransport_quiche::quiche as quiche;
 
 use tokio::net::UdpSocket;
