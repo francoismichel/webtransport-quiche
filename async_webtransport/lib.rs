@@ -1198,7 +1198,7 @@ impl AsyncWebTransportServer {
 
 }
 
-type ServerRef = Arc<Mutex<AsyncWebTransportServer>>;
+pub type ServerRef = Arc<Mutex<AsyncWebTransportServer>>;
 pub struct ServerRecvStream {
     server: ServerRef,
     stream_id: u64,
