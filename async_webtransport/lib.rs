@@ -35,7 +35,8 @@ use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
-use std::{io, thread};
+use std::task::Waker;
+use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
@@ -58,6 +59,9 @@ struct H3Client {
     webtransport_sessions: webtransport_quiche::Sessions,
 
     partial_responses: HashMap<u64, PartialResponse>,
+
+    read_blocked_streams: std::collections::HashMap<u64, Waker>,
+    write_blocked_streams: std::collections::HashMap<u64, Waker>,
 }
 type ClientMap = HashMap<quiche::ConnectionId<'static>, H3Client>;
 
@@ -962,6 +966,8 @@ impl AsyncWebTransportServer {
                         http3_conn: None,
                         partial_responses: HashMap::new(),
                         webtransport_sessions: webtransport_quiche::Sessions::new(true),
+                        read_blocked_streams: std::collections::HashMap::new(),
+                        write_blocked_streams: std::collections::HashMap::new(),
                     };
 
                     client
@@ -996,6 +1002,9 @@ impl AsyncWebTransportServer {
 
                 debug!("{} processed {} bytes", client.conn.trace_id(), read);
 
+                self.wake_write_streams(&conn_id.to_vec());
+                // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
+                let client = self.clients.get_mut(&conn_id).unwrap();
                 // Create a new HTTP/3 connection as soon as the QUIC connection
                 // is established.
                 if (client.conn.is_in_early_data() || client.conn.is_established())
@@ -1131,7 +1140,11 @@ impl AsyncWebTransportServer {
                         &mut h3_conn,
                         &mut client.conn,
                     ) {
-                        Ok(Some(session_id)) => return Ok(Event::StreamData(session_id, stream_id)),
+                        Ok(Some(session_id)) => {
+                            // handle async behaviours
+                            self.wake_read_stream(&scid, stream_id)?;
+                            return Ok(Event::StreamData(session_id, stream_id));
+                        },
                         Err(e) => error!("could not provide stream {} data to webtransport session: {:?}", stream_id, e),
                         e => error!("available stream data returned {:?}", e),
                     }
@@ -1148,6 +1161,62 @@ impl AsyncWebTransportServer {
             }
         }
         Ok(Event::Done)
+    }
+
+    pub fn insert_read_waker(&mut self, client: &Vec<u8>, stream_id: u64, waker: Waker) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        client.read_blocked_streams.insert(stream_id, waker);
+        Ok(())
+    }
+
+    pub fn insert_write_waker(&mut self, client: &Vec<u8>, stream_id: u64, waker: Waker) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        client.write_blocked_streams.insert(stream_id, waker);
+        Ok(())
+    }
+
+    pub fn wake_read_stream(&mut self, client: &Vec<u8>, stream_id: u64) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        if let Some(waker) = client.read_blocked_streams.remove(&stream_id) {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    pub fn wake_write_stream(&mut self, client: &Vec<u8>, stream_id: u64) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        if let Some(waker) = client.write_blocked_streams.remove(&stream_id) {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    pub fn wake_write_streams(&mut self, client: &Vec<u8>) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        for (_stream_id, waker) in client.write_blocked_streams.drain() {
+            waker.wake();
+        }
+        Ok(())
     }
 
     pub fn open_uni_stream(&mut self, client: &Vec<u8>, session_id: u64) -> Result<u64, Error> {
@@ -1207,10 +1276,9 @@ pub struct ServerBidiStream {
 
 impl ServerBidiStream {
 
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64,
-               send_watcher: tokio::sync::mpsc::Receiver<()>, recv_watcher: tokio::sync::mpsc::Receiver<()>) -> ServerBidiStream {
-        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id, send_watcher);
-        let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id, recv_watcher);
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerBidiStream {
+        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id);
+        let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id);
         ServerBidiStream {
             send,
             recv,
@@ -1264,17 +1332,15 @@ pub struct ServerRecvStream {
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
-    new_data_available: std::sync::mpsc::Receiver<()>,
 }
 
 impl ServerRecvStream {
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64, watcher: std::sync::mpsc::Receiver<()>) -> ServerRecvStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerRecvStream {
         ServerRecvStream {
             server,
             stream_id,
             session_id,
             connection_id,
-            new_data_available: watcher,
         }
     }
 }
@@ -1282,7 +1348,7 @@ impl ServerRecvStream {
 impl AsyncRead for ServerRecvStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
         
@@ -1298,13 +1364,7 @@ impl AsyncRead for ServerRecvStream {
                 std::task::Poll::Ready(Ok(()))
             },
             Err(Error::Done) => {
-                thread::spawn(move || {
-                    self.new_data_available.
-                    if let Some(waker) = shared_state.waker.take() {
-                        waker.wake()
-                    }
-                });
-        
+                stream.server.lock().unwrap().insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
                 std::task::Poll::Pending
             }
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
@@ -1317,13 +1377,12 @@ pub struct ServerSendStream {
     server: ServerRef,
     stream_id: u64,
     connection_id: Vec<u8>,
-    can_send_new_data: std::sync::mpsc::Receiver<()>,
 }
 
 impl ServerSendStream {
     fn _poll_write(
         &mut self,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
         buf: &[u8],
         fin: bool,
     ) -> std::task::Poll<Result<usize, io::Error>> {
@@ -1333,18 +1392,18 @@ impl ServerSendStream {
                 std::task::Poll::Ready(Ok(read))
             },
             Err(Error::Done) => {
+                self.server.lock().unwrap().insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone());
                 std::task::Poll::Pending
-            }
-            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
+            },
+            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e))),
         }
     }
 
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64, watcher: tokio::sync::watch::Receiver<()>) -> ServerSendStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
         ServerSendStream {
             server,
             stream_id,
             connection_id,
-            can_send_new_data: watcher,
         }
     }
 }
