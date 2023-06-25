@@ -35,7 +35,7 @@ use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
-use std::io;
+use std::{io, thread};
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
@@ -1207,9 +1207,10 @@ pub struct ServerBidiStream {
 
 impl ServerBidiStream {
 
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerBidiStream {
-        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id);
-        let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id);
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64,
+               send_watcher: tokio::sync::mpsc::Receiver<()>, recv_watcher: tokio::sync::mpsc::Receiver<()>) -> ServerBidiStream {
+        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id, send_watcher);
+        let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id, recv_watcher);
         ServerBidiStream {
             send,
             recv,
@@ -1263,15 +1264,17 @@ pub struct ServerRecvStream {
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
+    new_data_available: std::sync::mpsc::Receiver<()>,
 }
 
 impl ServerRecvStream {
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerRecvStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64, watcher: std::sync::mpsc::Receiver<()>) -> ServerRecvStream {
         ServerRecvStream {
             server,
             stream_id,
             session_id,
             connection_id,
+            new_data_available: watcher,
         }
     }
 }
@@ -1295,6 +1298,13 @@ impl AsyncRead for ServerRecvStream {
                 std::task::Poll::Ready(Ok(()))
             },
             Err(Error::Done) => {
+                thread::spawn(move || {
+                    self.new_data_available.
+                    if let Some(waker) = shared_state.waker.take() {
+                        waker.wake()
+                    }
+                });
+        
                 std::task::Poll::Pending
             }
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
@@ -1307,6 +1317,7 @@ pub struct ServerSendStream {
     server: ServerRef,
     stream_id: u64,
     connection_id: Vec<u8>,
+    can_send_new_data: std::sync::mpsc::Receiver<()>,
 }
 
 impl ServerSendStream {
@@ -1328,11 +1339,12 @@ impl ServerSendStream {
         }
     }
 
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64, watcher: tokio::sync::watch::Receiver<()>) -> ServerSendStream {
         ServerSendStream {
             server,
             stream_id,
             connection_id,
+            can_send_new_data: watcher,
         }
     }
 }
