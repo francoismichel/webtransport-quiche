@@ -1216,6 +1216,9 @@ impl ServerBidiStream {
         }
     }
 
+    pub fn split(self) -> (ServerSendStream, ServerRecvStream) {
+        (self.send, self.recv)
+    }
 }
 
 impl AsyncRead for ServerBidiStream {
