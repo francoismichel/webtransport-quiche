@@ -1199,6 +1199,62 @@ impl AsyncWebTransportServer {
 }
 
 pub type ServerRef = Arc<Mutex<AsyncWebTransportServer>>;
+
+pub struct ServerBidiStream {
+    send: ServerSendStream,
+    recv: ServerRecvStream,
+}
+
+impl ServerBidiStream {
+
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerBidiStream {
+        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id);
+        let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id);
+        ServerBidiStream {
+            send,
+            recv,
+        }
+    }
+
+}
+
+impl AsyncRead for ServerBidiStream {
+
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let mut_self: &mut ServerBidiStream = self.get_mut();
+        let boxed: std::pin::Pin<&mut ServerRecvStream> = std::pin::Pin::new(&mut mut_self.recv); 
+        boxed.poll_read(_cx, buf)
+    }
+}
+
+impl AsyncWrite for ServerBidiStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        let mut_self: &mut ServerBidiStream = self.get_mut();
+        let boxed: std::pin::Pin<&mut ServerSendStream> = std::pin::Pin::new(&mut mut_self.send);
+        boxed.poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        let mut_self: &mut ServerBidiStream = self.get_mut();
+        let boxed: std::pin::Pin<&mut ServerSendStream> = std::pin::Pin::new(&mut mut_self.send);
+        boxed.poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        let mut_self: &mut ServerBidiStream = self.get_mut();
+        let boxed: std::pin::Pin<&mut ServerSendStream> = std::pin::Pin::new(&mut mut_self.send);
+        boxed.poll_shutdown(cx)
+    }
+}
+
 pub struct ServerRecvStream {
     server: ServerRef,
     stream_id: u64,
