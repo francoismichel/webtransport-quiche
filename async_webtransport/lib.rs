@@ -37,7 +37,7 @@ use webtransport_quiche::quiche::ConnectionId;
 use std::fs::File;
 use std::task::Waker;
 use std::io;
-use std::net::{self, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
