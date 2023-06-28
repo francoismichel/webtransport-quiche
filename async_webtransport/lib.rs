@@ -37,7 +37,7 @@ use webtransport_quiche::quiche::ConnectionId;
 use std::fs::File;
 use std::task::Waker;
 use std::io;
-use std::net::{self, SocketAddr, ToSocketAddrs};
+use std::net::{self, SocketAddr, ToSocketAddrs, UdpSocket};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -742,13 +742,14 @@ impl From<webtransport_quiche::Error> for Error {
 
 impl AsyncWebTransportServer {
 
-    pub async fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<AsyncWebTransportServer, Error> {
+    pub fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<AsyncWebTransportServer, Error> {
     
         // Setup the event loop.
         let events = mio::Events::with_capacity(1024);
     
         // Create the UDP listening socket, and register it with the event loop.
-        let socket = tokio::net::UdpSocket::bind(addr).await?;
+        let socket = std::net::UdpSocket::bind(addr)?;
+        let socket = tokio::net::UdpSocket::from_std(socket)?;
     
         let rng = SystemRandom::new();
         let conn_id_seed = ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
