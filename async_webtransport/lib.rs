@@ -992,7 +992,7 @@ impl AsyncWebTransportServer {
 
                 self.wake_write_streams(&hdr.dcid.to_vec());
                 // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
-                let client = self.clients.get_mut(&conn_id).unwrap();
+                let client = self.clients.get_mut(&hdr.dcid).unwrap();
                 // Create a new HTTP/3 connection as soon as the QUIC connection
                 // is established.
                 if (client.conn.is_in_early_data() || client.conn.is_established())
