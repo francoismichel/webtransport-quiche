@@ -85,7 +85,6 @@ pub struct AsyncWebTransportServer {
     h3_config: quiche::h3::Config,
     socket: UdpSocket,
     clients: ClientMap,
-    events: mio::Events,
     conn_id_seed: ring::hmac::Key,
     keylog: Option<File>,
 }
@@ -746,9 +745,6 @@ impl AsyncWebTransportServer {
 
     pub fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<AsyncWebTransportServer, Error> {
     
-        // Setup the event loop.
-        let events = mio::Events::with_capacity(1024);
-    
         // Create the UDP listening socket, and register it with the event loop.
         let socket = std::net::UdpSocket::bind(addr)?;
         let socket = tokio::net::UdpSocket::from_std(socket)?;
@@ -765,7 +761,6 @@ impl AsyncWebTransportServer {
             h3_config: h3_config,
             socket,
             clients:ClientMap::new(),
-            events,
             conn_id_seed,
             keylog,
         })
@@ -834,16 +829,6 @@ impl AsyncWebTransportServer {
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
             'read: loop {
-                // If the event loop reported no events, it means that the timeout
-                // has expired, so handle it without attempting to read packets. We
-                // will then proceed with the send loop.
-                if self.events.is_empty() {
-                    debug!("timed out");
-
-                    self.clients.values_mut().for_each(|c| c.conn.on_timeout());
-
-                    break 'read;
-                }
 
                 let (len, from) = match self.socket.recv_from(&mut self.buf).await {
                     Ok(v) => v,
