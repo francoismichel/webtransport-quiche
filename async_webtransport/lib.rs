@@ -35,12 +35,14 @@ use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
-use std::task::Waker;
+use std::task::{Waker, ready};
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use ring::rand::*;
 use thiserror::Error as Error;
@@ -1355,7 +1357,8 @@ impl AsyncRead for ServerRecvStream {
         
         let stream = self.get_mut();
 
-        let mut server = stream.server.lock().unwrap();
+        
+        let mut server = stream.server.blocking_lock();
         match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
             Ok(read) => {
                 buf.advance(read);
@@ -1365,7 +1368,7 @@ impl AsyncRead for ServerRecvStream {
                 std::task::Poll::Ready(Ok(()))
             },
             Err(Error::Done) => {
-                stream.server.lock().unwrap().insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
+                server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
                 std::task::Poll::Pending
             }
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
@@ -1387,13 +1390,13 @@ impl ServerSendStream {
         buf: &[u8],
         fin: bool,
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        let mut server = self.server.lock().unwrap();
+        let mut server = self.server.blocking_lock();
         match server.write(&self.connection_id, self.stream_id, buf, fin) {
             Ok(read) => {
                 std::task::Poll::Ready(Ok(read))
             },
             Err(Error::Done) => {
-                self.server.lock().unwrap().insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone());
+                server.insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone());
                 std::task::Poll::Pending
             },
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e))),
