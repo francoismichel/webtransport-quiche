@@ -825,7 +825,8 @@ impl AsyncWebTransportServer {
 
 
             let local_addr = self.socket.local_addr().unwrap();
-            
+            let sleep = tokio::time::sleep(tokio::time::Duration::from_millis(1));
+            tokio::pin!(sleep);
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
             'read: loop {
@@ -1026,10 +1027,10 @@ impl AsyncWebTransportServer {
 
                             return Ok(Some(client.conn.source_id().to_vec()));
                         }
-                    }
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
+                    },
+                    () = &mut sleep => {
                         break 'read;
-                    }
+                    },
                 }
             }
         }
