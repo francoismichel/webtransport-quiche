@@ -1027,7 +1027,7 @@ impl AsyncWebTransportServer {
                             return Ok(Some(client.conn.source_id().to_vec()));
                         }
                     }
-                    else => {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
                         break 'read;
                     }
                 }
