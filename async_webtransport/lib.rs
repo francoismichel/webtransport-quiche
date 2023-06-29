@@ -829,200 +829,207 @@ impl AsyncWebTransportServer {
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
             'read: loop {
-
-                let (len, from) = match self.socket.recv_from(&mut self.buf).await {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        panic!("recv() failed: {:?}", e);
-                    }
-                };
-
-                debug!("got {} bytes", len);
-
-                let pkt_buf = &mut self.buf[..len];
-
-                // Parse the QUIC packet's header.
-                let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        error!("Parsing packet header failed: {:?}", e);
-                        continue 'read;
-                    }
-                };
-
-                trace!("got packet {:?}", hdr);
-
-                let conn_id = ring::hmac::sign(&self.conn_id_seed, &hdr.dcid);
-                let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                let conn_id = conn_id.to_vec().into();
-
-                // Lookup a connection based on the packet's connection ID. If there
-                // is no connection matching, create a new one.
-                let client = if !self.clients.contains_key(&hdr.dcid) && !self.clients.contains_key(&conn_id) {
-                    if hdr.ty != quiche::Type::Initial {
-                        error!("Packet is not Initial");
-                        continue 'read;
-                    }
-
-                    if !quiche::version_is_supported(hdr.version) {
-                        warn!("Doing version negotiation");
-
-                        let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut self.dgrams_buf) {
-                            l
-                        } else {
-                            continue 'read;
+                tokio::select! {
+                    res = self.socket.recv_from(&mut self.buf) => {
+                        let (len, from) = match res {
+                            Ok(v) => {
+                                v
+                            }
+                            Err(e) => {
+                                panic!("recv() failed: {:?}", e);
+                            }
                         };
 
-                        let out = &self.dgrams_buf[..len];
+                        debug!("got {} bytes", len);
 
-                        if let Err(e) = self.socket.send_to(out, from).await {
-                            panic!("send() failed: {:?}", e);
-                        }
-                        continue 'read;
-                    }
+                        let pkt_buf = &mut self.buf[..len];
 
-                    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                    scid.copy_from_slice(&conn_id);
-
-                    let scid = quiche::ConnectionId::from_ref(&scid);
-
-                    // Token is always present in Initial packets.
-                    let token = hdr.token.as_ref().unwrap();
-
-                    // Do stateless retry if the client didn't send a token.
-                    if token.is_empty() {
-                        warn!("Doing stateless retry");
-
-                        let new_token = mint_token(&hdr, &from);
-
-                        let len = quiche::retry(
-                            &hdr.scid,
-                            &hdr.dcid,
-                            &scid,
-                            &new_token,
-                            hdr.version,
-                            &mut self.dgrams_buf,
-                        )
-                        .unwrap();
-
-                        let out = &self.dgrams_buf[..len];
-
-                        if let Err(e) = self.socket.send_to(out, from).await {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                debug!("send() would block");
-                                break;
-                            }
-
-                            panic!("send() failed: {:?}", e);
-                        }
-                        continue 'read;
-                    }
-
-                    let odcid = validate_token(&from, token);
-
-                    // The token was not valid, meaning the retry failed, so
-                    // drop the packet.
-                    if odcid.is_none() {
-                        error!("Invalid address validation token");
-                        continue 'read;
-                    }
-
-                    if scid.len() != hdr.dcid.len() {
-                        error!("Invalid destination connection ID");
-                        continue 'read;
-                    }
-
-                    // Reuse the source connection ID we sent in the Retry packet,
-                    // instead of changing it again.
-                    let scid = hdr.dcid.clone();
-
-                    debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-
-                    let mut conn =
-                        quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut self.quic_config).unwrap();
-
-                    if let Some(keylog) = &mut self.keylog {
-                        if let Ok(keylog) = keylog.try_clone() {
-                            conn.set_keylog(Box::new(keylog));
-                        }
-                    }
-
-                    let client = H3Client {
-                        conn,
-                        http3_conn: None,
-                        partial_responses: HashMap::new(),
-                        webtransport_sessions: webtransport_quiche::Sessions::new(true),
-                        read_blocked_streams: std::collections::HashMap::new(),
-                        write_blocked_streams: std::collections::HashMap::new(),
-                    };
-
-                    client
-                        .webtransport_sessions
-                        .configure_h3_for_webtransport(&mut self.h3_config)?;
-
-                    self.clients.insert(scid.clone(), client);
-
-                    self.clients.get_mut(&scid).unwrap()
-                } else {
-                    match self.clients.get_mut(&hdr.dcid) {
-                        Some(v) => v,
-
-                        None => self.clients.get_mut(&conn_id).unwrap(),
-                    }
-                };
-
-                let recv_info = quiche::RecvInfo {
-                    to: self.socket.local_addr().unwrap(),
-                    from,
-                };
-
-                // Process potentially coalesced packets.
-                let read = match client.conn.recv(pkt_buf, recv_info) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        error!("{} recv failed: {:?}", client.conn.trace_id(), e);
-                        continue 'read;
-                    }
-                };
-
-                debug!("{} processed {} bytes", client.conn.trace_id(), read);
-
-                self.wake_write_streams(&hdr.dcid.to_vec());
-                // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
-                let client = self.clients.get_mut(&hdr.dcid).unwrap();
-                // Create a new HTTP/3 connection as soon as the QUIC connection
-                // is established.
-                if (client.conn.is_in_early_data() || client.conn.is_established())
-                    && client.http3_conn.is_none()
-                {
-                    debug!(
-                        "{} QUIC handshake completed, now trying HTTP/3",
-                        client.conn.trace_id()
-                    );
-
-                    let h3_conn =
-                        match quiche::h3::Connection::with_transport(&mut client.conn, &self.h3_config) {
+                        // Parse the QUIC packet's header.
+                        let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
                             Ok(v) => v,
 
                             Err(e) => {
-                                error!("failed to create HTTP/3 connection: {}", e);
+                                error!("Parsing packet header failed: {:?}", e);
                                 continue 'read;
                             }
                         };
-                    // TODO: sanity check h3 connection before adding to map
-                    client.http3_conn = Some(h3_conn);
-                }
 
-                if client.http3_conn.is_some() {
-                    // Handle writable streams.
-                    for stream_id in client.conn.writable() {
-                        handle_writable(client, stream_id);
+                        trace!("got packet {:?}", hdr);
+
+                        let conn_id = ring::hmac::sign(&self.conn_id_seed, &hdr.dcid);
+                        let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
+                        let conn_id = conn_id.to_vec().into();
+
+                        // Lookup a connection based on the packet's connection ID. If there
+                        // is no connection matching, create a new one.
+                        let client = if !self.clients.contains_key(&hdr.dcid) && !self.clients.contains_key(&conn_id) {
+                            if hdr.ty != quiche::Type::Initial {
+                                error!("Packet is not Initial");
+                                continue 'read;
+                            }
+
+                            if !quiche::version_is_supported(hdr.version) {
+                                warn!("Doing version negotiation");
+
+                                let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut self.dgrams_buf) {
+                                    l
+                                } else {
+                                    continue 'read;
+                                };
+
+                                let out = &self.dgrams_buf[..len];
+
+                                if let Err(e) = self.socket.send_to(out, from).await {
+                                    panic!("send() failed: {:?}", e);
+                                }
+                                continue 'read;
+                            }
+
+                            let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+                            scid.copy_from_slice(&conn_id);
+
+                            let scid = quiche::ConnectionId::from_ref(&scid);
+
+                            // Token is always present in Initial packets.
+                            let token = hdr.token.as_ref().unwrap();
+
+                            // Do stateless retry if the client didn't send a token.
+                            if token.is_empty() {
+                                warn!("Doing stateless retry");
+
+                                let new_token = mint_token(&hdr, &from);
+
+                                let len = quiche::retry(
+                                    &hdr.scid,
+                                    &hdr.dcid,
+                                    &scid,
+                                    &new_token,
+                                    hdr.version,
+                                    &mut self.dgrams_buf,
+                                )
+                                .unwrap();
+
+                                let out = &self.dgrams_buf[..len];
+
+                                if let Err(e) = self.socket.send_to(out, from).await {
+                                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                                        debug!("send() would block");
+                                        break;
+                                    }
+
+                                    panic!("send() failed: {:?}", e);
+                                }
+                                continue 'read;
+                            }
+
+                            let odcid = validate_token(&from, token);
+
+                            // The token was not valid, meaning the retry failed, so
+                            // drop the packet.
+                            if odcid.is_none() {
+                                error!("Invalid address validation token");
+                                continue 'read;
+                            }
+
+                            if scid.len() != hdr.dcid.len() {
+                                error!("Invalid destination connection ID");
+                                continue 'read;
+                            }
+
+                            // Reuse the source connection ID we sent in the Retry packet,
+                            // instead of changing it again.
+                            let scid = hdr.dcid.clone();
+
+                            debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
+
+                            let mut conn =
+                                quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut self.quic_config).unwrap();
+
+                            if let Some(keylog) = &mut self.keylog {
+                                if let Ok(keylog) = keylog.try_clone() {
+                                    conn.set_keylog(Box::new(keylog));
+                                }
+                            }
+
+                            let client = H3Client {
+                                conn,
+                                http3_conn: None,
+                                partial_responses: HashMap::new(),
+                                webtransport_sessions: webtransport_quiche::Sessions::new(true),
+                                read_blocked_streams: std::collections::HashMap::new(),
+                                write_blocked_streams: std::collections::HashMap::new(),
+                            };
+
+                            client
+                                .webtransport_sessions
+                                .configure_h3_for_webtransport(&mut self.h3_config)?;
+
+                            self.clients.insert(scid.clone(), client);
+
+                            self.clients.get_mut(&scid).unwrap()
+                        } else {
+                            match self.clients.get_mut(&hdr.dcid) {
+                                Some(v) => v,
+
+                                None => self.clients.get_mut(&conn_id).unwrap(),
+                            }
+                        };
+
+                        let recv_info = quiche::RecvInfo {
+                            to: self.socket.local_addr().unwrap(),
+                            from,
+                        };
+
+                        // Process potentially coalesced packets.
+                        let read = match client.conn.recv(pkt_buf, recv_info) {
+                            Ok(v) => v,
+
+                            Err(e) => {
+                                error!("{} recv failed: {:?}", client.conn.trace_id(), e);
+                                continue 'read;
+                            }
+                        };
+
+                        debug!("{} processed {} bytes", client.conn.trace_id(), read);
+
+                        self.wake_write_streams(&hdr.dcid.to_vec());
+                        // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
+                        let client = self.clients.get_mut(&hdr.dcid).unwrap();
+                        // Create a new HTTP/3 connection as soon as the QUIC connection
+                        // is established.
+                        if (client.conn.is_in_early_data() || client.conn.is_established())
+                            && client.http3_conn.is_none()
+                        {
+                            debug!(
+                                "{} QUIC handshake completed, now trying HTTP/3",
+                                client.conn.trace_id()
+                            );
+
+                            let h3_conn =
+                                match quiche::h3::Connection::with_transport(&mut client.conn, &self.h3_config) {
+                                    Ok(v) => v,
+
+                                    Err(e) => {
+                                        error!("failed to create HTTP/3 connection: {}", e);
+                                        continue 'read;
+                                    }
+                                };
+                            // TODO: sanity check h3 connection before adding to map
+                            client.http3_conn = Some(h3_conn);
+                        }
+
+                        if client.http3_conn.is_some() {
+                            // Handle writable streams.
+                            for stream_id in client.conn.writable() {
+                                handle_writable(client, stream_id);
+                            }
+
+                            return Ok(Some(client.conn.source_id().to_vec()));
+                        }
                     }
-
-                    return Ok(Some(client.conn.source_id().to_vec()));
+                    else => {
+                        break 'read;
+                    }
                 }
             }
         }
