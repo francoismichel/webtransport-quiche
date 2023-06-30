@@ -35,6 +35,7 @@ use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
+use std::future::Future;
 use std::task::{Waker, ready};
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
@@ -1349,9 +1350,8 @@ impl AsyncRead for ServerRecvStream {
     ) -> std::task::Poll<io::Result<()>> {
         
         let stream = self.get_mut();
-
-        
-        let mut server = stream.server.blocking_lock();
+        let server = std::pin::pin!(stream.server.lock());
+        let mut server = ready!(server.poll(cx));
         match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
             Ok(read) => {
                 buf.advance(read);
@@ -1383,7 +1383,8 @@ impl ServerSendStream {
         buf: &[u8],
         fin: bool,
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        let mut server = self.server.blocking_lock();
+        let server = std::pin::pin!(self.server.lock());
+        let mut server = ready!(server.poll(cx));
         match server.write(&self.connection_id, self.stream_id, buf, fin) {
             Ok(read) => {
                 std::task::Poll::Ready(Ok(read))
