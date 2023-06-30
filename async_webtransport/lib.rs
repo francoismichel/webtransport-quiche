@@ -1139,7 +1139,6 @@ impl AsyncWebTransportServer {
                     ) {
                         Ok(Some(session_id)) => {
                             // handle async behaviours
-                            self.wake_read_stream(&scid, stream_id)?;
                             return Ok(Event::StreamData(session_id, stream_id));
                         },
                         Err(e) => error!("could not provide stream {} data to webtransport session: {:?}", stream_id, e),
@@ -1156,6 +1155,9 @@ impl AsyncWebTransportServer {
                     return Err(Error::H3Error(e));
                 }
             }
+        }
+        for (stream_id, session_id) in client.webtransport_sessions.readable() {
+            self.wake_read_stream(scid, stream_id);
         }
         Ok(Event::Done)
     }
