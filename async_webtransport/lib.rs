@@ -1076,7 +1076,7 @@ impl AsyncWebTransportServer {
                                 break;
                             }
                         };
-                        if let Err(e) = server.socket.send_to(buf, send_info.to).await {
+                        if let Err(e) = server.socket.send_to(&buf[..write], send_info.to).await {
                             if e.kind() == std::io::ErrorKind::WouldBlock {
                                 debug!("send() would block");
                                 break;
