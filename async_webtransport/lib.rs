@@ -43,7 +43,7 @@ use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use ring::rand::*;
 use thiserror::Error as Error;
@@ -1626,6 +1626,7 @@ pub struct ServerRecvStream {
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
+    mutex_poll_state: Option<std::pin::Pin<Box<dyn Future<Output = OwnedMutexGuard<AsyncWebTransportServer>>>>>,
 }
 
 impl ServerRecvStream {
@@ -1635,6 +1636,7 @@ impl ServerRecvStream {
             stream_id,
             session_id,
             connection_id,
+            mutex_poll_state: None,
         }
     }
 }
@@ -1647,22 +1649,30 @@ impl AsyncRead for ServerRecvStream {
     ) -> std::task::Poll<io::Result<()>> {
         
         let stream = self.get_mut();
-        let server = std::pin::pin!(stream.server.lock());
-        let mut server = ready!(server.poll(cx));
-        match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
-            Ok(read) => {
-                buf.advance(read);
-                std::task::Poll::Ready(Ok(()))
-            },
-            Err(Error::Finished) => {
-                std::task::Poll::Ready(Ok(()))
-            },
-            Err(Error::Done) => {
-                server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
-                std::task::Poll::Pending
-            }
-            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
+        if stream.mutex_poll_state.is_none() {
+            stream.mutex_poll_state = Some(Box::pin(stream.server.clone().lock_owned()));
         }
+        match stream.mutex_poll_state.as_mut().unwrap().as_mut().poll(cx) {
+            std::task::Poll::Ready(mut server) => {
+                stream.mutex_poll_state = None;
+                match &mut server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
+                    Ok(read) => {
+                        buf.advance(*read);
+                        std::task::Poll::Ready(Ok(()))
+                    },
+                    Err(Error::Finished) => {
+                        std::task::Poll::Ready(Ok(()))
+                    },
+                    Err(Error::Done) => {
+                        server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
+                        std::task::Poll::Pending
+                    }
+                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e.to_string())))
+                }
+            },
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+        
     }
     
 }
