@@ -1052,34 +1052,41 @@ impl AsyncWebTransportServer {
             // Generate outgoing QUIC packets for all active connections and send
             // them on the UDP socket, until quiche reports that there are no more
             // packets to be sent.
-            for client in server.lock().await.clients.values_mut() {
-                loop {
-                    let (write, send_info) = match client.conn.send(&mut server.lock().await.dgrams_buf) {
-                        Ok(v) => v,
-
-                        Err(quiche::Error::Done) => {
-                            debug!("{} done writing", client.conn.trace_id());
-                            break;
-                        }
-
-                        Err(e) => {
-                            error!("{} send failed: {:?}", client.conn.trace_id(), e);
-
-                            client.conn.close(false, 0x1, b"fail").ok();
-                            break;
-                        }
-                    };
+            {
+                let keys = {
                     let server = server.lock().await;
-                    if let Err(e) = server.socket.send_to(&server.dgrams_buf[..write], send_info.to).await {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            debug!("send() would block");
-                            break;
+                    server.clients.keys().map(|x| x.to_vec()).collect::<Vec<_>>()
+                };
+                for cid in keys {
+                    let mut server = server.lock().await;
+                    loop {
+                        let client = server.clients.get_mut(&cid.clone().into()).unwrap();
+                        let (write, send_info) = match client.conn.send(buf) {
+                            Ok(v) => v,
+    
+                            Err(quiche::Error::Done) => {
+                                debug!("{} done writing", client.conn.trace_id());
+                                break;
+                            }
+    
+                            Err(e) => {
+                                error!("{} send failed: {:?}", client.conn.trace_id(), e);
+    
+                                client.conn.close(false, 0x1, b"fail").ok();
+                                break;
+                            }
+                        };
+                        if let Err(e) = server.socket.send_to(buf, send_info.to).await {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                debug!("send() would block");
+                                break;
+                            }
+    
+                            panic!("send() failed: {:?}", e);
                         }
-
-                        panic!("send() failed: {:?}", e);
+    
+                        // debug!("{} written {} bytes", client.conn.trace_id(), write);
                     }
-
-                    debug!("{} written {} bytes", client.conn.trace_id(), write);
                 }
             }
 
