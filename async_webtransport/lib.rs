@@ -1118,9 +1118,10 @@ impl AsyncWebTransportServer {
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
             'read: loop {
+                debug!("check if data available on the socket");
                 match tokio::time::timeout(tokio::time::Duration::from_millis(1), socket.recv_from(buf)).await {
                     Ok(res) => {
-    
+                        debug!("received data on the socket");
                         let (len, from) = match res {
                             Ok(v) => {
                                 v
