@@ -1115,13 +1115,12 @@ impl AsyncWebTransportServer {
 
 
             let local_addr = socket.local_addr().unwrap();
-            let sleep = tokio::time::sleep(tokio::time::Duration::from_millis(1));
-            tokio::pin!(sleep);
             // Read incoming UDP packets from the socket and feed them to quiche,
-            // until there are no more packets to read.µ
+            // until there are no more packets to read.
             'read: loop {
-                tokio::select! {
-                    res = socket.recv_from(buf) => {
+                match tokio::time::timeout(tokio::time::Duration::from_millis(1), socket.recv_from(buf)).await {
+                    Ok(res) => {
+    
                         let (len, from) = match res {
                             Ok(v) => {
                                 v
@@ -1130,23 +1129,23 @@ impl AsyncWebTransportServer {
                                 panic!("recv() failed: {:?}", e);
                             }
                         };
-
+    
                         debug!("got {} bytes", len);
-
+    
                         let pkt_buf = &mut buf[..len];
-
+    
                         // Parse the QUIC packet's header.
                         let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
                             Ok(v) => v,
-
+    
                             Err(e) => {
                                 error!("Parsing packet header failed: {:?}", e);
                                 continue 'read;
                             }
                         };
-
+    
                         trace!("got packet {:?}", hdr);
-
+    
                         let (conn_id, client_known) = {
                             let server = server.lock().unwrap();
                             let conn_id = ring::hmac::sign(&server.conn_id_seed, &hdr.dcid);
@@ -1155,7 +1154,7 @@ impl AsyncWebTransportServer {
                             let client_known = !server.clients.contains_key(&hdr.dcid) && !server.clients.contains_key(&conn_id);
                             (conn_id, client_known)
                         };
-
+    
                         // Lookup a connection based on the packet's connection ID. If there
                         // is no connection matching, create a new one.
                         if client_known {
@@ -1163,38 +1162,38 @@ impl AsyncWebTransportServer {
                                 error!("Packet is not Initial");
                                 continue 'read;
                             }
-
+    
                             if !quiche::version_is_supported(hdr.version) {
                                 warn!("Doing version negotiation");
-
+    
                                 let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, buf) {
                                     l
                                 } else {
                                     continue 'read;
                                 };
-
+    
                                 let out = &buf[..len];
-
+    
                                 if let Err(e) = socket.send_to(out, from).await {
                                     panic!("send() failed: {:?}", e);
                                 }
                                 continue 'read;
                             }
-
+    
                             let mut scid = [0; quiche::MAX_CONN_ID_LEN];
                             scid.copy_from_slice(&conn_id);
-
+    
                             let scid = quiche::ConnectionId::from_ref(&scid);
-
+    
                             // Token is always present in Initial packets.
                             let token = hdr.token.as_ref().unwrap();
-
+    
                             // Do stateless retry if the client didn't send a token.
                             if token.is_empty() {
                                 warn!("Doing stateless retry");
-
+    
                                 let new_token = mint_token(&hdr, &from);
-
+    
                                 let len = quiche::retry(
                                     &hdr.scid,
                                     &hdr.dcid,
@@ -1204,49 +1203,49 @@ impl AsyncWebTransportServer {
                                     buf,
                                 )
                                 .unwrap();
-
+    
                                 let out = &buf[..len];
-
+    
                                 if let Err(e) = socket.send_to(out, from).await {
                                     if e.kind() == std::io::ErrorKind::WouldBlock {
                                         debug!("send() would block");
                                         break;
                                     }
-
+    
                                     panic!("send() failed: {:?}", e);
                                 }
                                 continue 'read;
                             }
-
+    
                             let odcid = validate_token(&from, token);
-
+    
                             // The token was not valid, meaning the retry failed, so
                             // drop the packet.
                             if odcid.is_none() {
                                 error!("Invalid address validation token");
                                 continue 'read;
                             }
-
+    
                             if scid.len() != hdr.dcid.len() {
                                 error!("Invalid destination connection ID");
                                 continue 'read;
                             }
-
+    
                             // Reuse the source connection ID we sent in the Retry packet,
                             // instead of changing it again.
                             let scid = hdr.dcid.clone();
-
+    
                             debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-
+    
                             let mut conn =
                                 quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut server.lock().unwrap().quic_config).unwrap();
-
+    
                             if let Some(keylog) = &mut server.lock().unwrap().keylog {
                                 if let Ok(keylog) = keylog.try_clone() {
                                     conn.set_keylog(Box::new(keylog));
                                 }
                             }
-
+    
                             let client = H3Client {
                                 conn,
                                 http3_conn: None,
@@ -1259,34 +1258,34 @@ impl AsyncWebTransportServer {
                             client
                                 .webtransport_sessions
                                 .configure_h3_for_webtransport(&mut server.h3_config)?;
-
+    
                                 server.clients.insert(scid.clone(), client);
-
+    
                         }
                         let mut server = server.lock().unwrap();
                         let client = match server.clients.get_mut(&hdr.dcid) {
                             Some(v) => v,
-
+    
                             None => server.clients.get_mut(&conn_id).unwrap(),
                         };
-
+    
                         let recv_info = quiche::RecvInfo {
                             to: local_addr,
                             from,
                         };
-
+    
                         // Process potentially coalesced packets.
                         let read = match client.conn.recv(pkt_buf, recv_info) {
                             Ok(v) => v,
-
+    
                             Err(e) => {
                                 error!("{} recv failed: {:?}", client.conn.trace_id(), e);
                                 continue 'read;
                             }
                         };
-
+    
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
-
+    
                         server.wake_write_streams(&hdr.dcid.to_vec());
                         // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
                         let client = server.clients.get_mut(&hdr.dcid).unwrap();
@@ -1304,7 +1303,7 @@ impl AsyncWebTransportServer {
                             let h3_conn =
                                 match server.create_client_connection(&hdr.dcid.to_vec()) {
                                     Ok(v) => v,
-
+    
                                     Err(e) => {
                                         error!("failed to create HTTP/3 connection: {}", e);
                                         continue 'read;
@@ -1320,17 +1319,18 @@ impl AsyncWebTransportServer {
                         if client.http3_conn.is_none() {
                             client.http3_conn = h3_conn;
                         }
-
+    
                         if client.http3_conn.is_some() {
                             // Handle writable streams.
                             for stream_id in client.conn.writable() {
                                 handle_writable(client, stream_id);
                             }
-
+    
                             return Ok(Some(client.conn.source_id().to_vec()));
                         }
                     },
-                    () = &mut sleep => {
+                    Err(_) => {
+                        debug!("timeout on socket read");
                         break 'read;
                     },
                 }
