@@ -1709,6 +1709,15 @@ impl ServerSendStream {
     }
 }
 
+impl Drop for ServerSendStream {
+
+    /// close the stream implicitly on drop
+    fn drop(&mut self) {
+        let mut server = self.server.lock().unwrap();
+        server.write(&self.connection_id, self.stream_id, &[], true);
+    }
+}
+
 impl AsyncWrite for ServerSendStream {
 
     fn poll_write(
