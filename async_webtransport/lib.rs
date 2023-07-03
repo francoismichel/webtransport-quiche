@@ -43,7 +43,7 @@ use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use std::sync::Mutex;
 
 use ring::rand::*;
 use thiserror::Error as Error;
@@ -78,13 +78,14 @@ struct PartialResponse {
     is_connect: bool,
 }
 
+type SocketRef = Arc<tokio::net::UdpSocket>;
+
 
 pub struct AsyncWebTransportServer {
     buf: [u8; 65535],
     dgrams_buf: [u8; MAX_DATAGRAM_SIZE],
     quic_config: quiche::Config,
     h3_config: quiche::h3::Config,
-    socket: UdpSocket,
     clients: ClientMap,
     conn_id_seed: ring::hmac::Key,
     keylog: Option<File>,
@@ -760,14 +761,13 @@ impl AsyncWebTransportServer {
             dgrams_buf: [0; MAX_DATAGRAM_SIZE],
             quic_config: quic_config,
             h3_config: h3_config,
-            socket,
             clients:ClientMap::new(),
             conn_id_seed,
             keylog,
         })
     }
 
-    pub async fn listen(&mut self) -> Result<Option<Vec<u8>>, Error> {
+    pub async fn listen(&mut self, socket: SocketRef) -> Result<Option<Vec<u8>>, Error> {
         loop {
 
             // Generate outgoing QUIC packets for all active connections and send
@@ -791,7 +791,7 @@ impl AsyncWebTransportServer {
                         }
                     };
 
-                    if let Err(e) = self.socket.send_to(&self.dgrams_buf[..write], send_info.to).await {
+                    if let Err(e) = socket.send_to(&self.dgrams_buf[..write], send_info.to).await {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -825,14 +825,14 @@ impl AsyncWebTransportServer {
             });
 
 
-            let local_addr = self.socket.local_addr().unwrap();
+            let local_addr = socket.local_addr().unwrap();
             let sleep = tokio::time::sleep(tokio::time::Duration::from_millis(1));
             tokio::pin!(sleep);
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.
             'read: loop {
                 tokio::select! {
-                    res = self.socket.recv_from(&mut self.buf) => {
+                    res = socket.recv_from(&mut self.buf) => {
                         let (len, from) = match res {
                             Ok(v) => {
                                 v
@@ -881,7 +881,7 @@ impl AsyncWebTransportServer {
 
                                 let out = &self.dgrams_buf[..len];
 
-                                if let Err(e) = self.socket.send_to(out, from).await {
+                                if let Err(e) = socket.send_to(out, from).await {
                                     panic!("send() failed: {:?}", e);
                                 }
                                 continue 'read;
@@ -913,7 +913,7 @@ impl AsyncWebTransportServer {
 
                                 let out = &self.dgrams_buf[..len];
 
-                                if let Err(e) = self.socket.send_to(out, from).await {
+                                if let Err(e) = socket.send_to(out, from).await {
                                     if e.kind() == std::io::ErrorKind::WouldBlock {
                                         debug!("send() would block");
                                         break;
@@ -978,7 +978,7 @@ impl AsyncWebTransportServer {
                         };
 
                         let recv_info = quiche::RecvInfo {
-                            to: self.socket.local_addr().unwrap(),
+                            to: socket.local_addr().unwrap(),
                             from,
                         };
 
@@ -1046,7 +1046,7 @@ impl AsyncWebTransportServer {
         quiche::h3::Connection::with_transport(&mut client.conn, &self.h3_config).map_err(|_| Error::CouldNotConnect)
     }
 
-    pub async fn listen_ref(server: ServerRef, buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+    pub async fn listen_ref(server: ServerRef, socket: SocketRef, buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         loop {
 
             // Generate outgoing QUIC packets for all active connections and send
@@ -1054,29 +1054,32 @@ impl AsyncWebTransportServer {
             // packets to be sent.
             {
                 let keys = {
-                    let server = server.lock().await;
+                    let server = server.lock().unwrap();
                     server.clients.keys().map(|x| x.to_vec()).collect::<Vec<_>>()
                 };
                 for cid in keys {
-                    let mut server = server.lock().await;
                     loop {
-                        let client = server.clients.get_mut(&cid.clone().into()).unwrap();
-                        let (write, send_info) = match client.conn.send(buf) {
-                            Ok(v) => v,
-    
-                            Err(quiche::Error::Done) => {
-                                debug!("{} done writing", client.conn.trace_id());
-                                break;
-                            }
-    
-                            Err(e) => {
-                                error!("{} send failed: {:?}", client.conn.trace_id(), e);
-    
-                                client.conn.close(false, 0x1, b"fail").ok();
-                                break;
-                            }
+                        let (write, target_addr) = {
+                            let mut server = server.lock().unwrap();
+                            let client = server.clients.get_mut(&cid.clone().into()).unwrap();
+                            let (write, send_info) = match client.conn.send(buf) {
+                                Ok(v) => v,
+        
+                                Err(quiche::Error::Done) => {
+                                    debug!("{} done writing", client.conn.trace_id());
+                                    break;
+                                }
+        
+                                Err(e) => {
+                                    error!("{} send failed: {:?}", client.conn.trace_id(), e);
+        
+                                    client.conn.close(false, 0x1, b"fail").ok();
+                                    break;
+                                }
+                            };
+                            (write, send_info.to)
                         };
-                        if let Err(e) = server.socket.send_to(&buf[..write], send_info.to).await {
+                        if let Err(e) = socket.send_to(&buf[..write], target_addr).await {
                             if e.kind() == std::io::ErrorKind::WouldBlock {
                                 debug!("send() would block");
                                 break;
@@ -1091,7 +1094,7 @@ impl AsyncWebTransportServer {
             }
 
             // Garbage collect closed connections.
-            server.lock().await.clients.retain(|_, ref mut c| {
+            server.lock().unwrap().clients.retain(|_, ref mut c| {
                 debug!("Collecting garbage");
                 if c.conn.is_closed() {
                     info!(
@@ -1111,15 +1114,14 @@ impl AsyncWebTransportServer {
             });
 
 
-            let local_addr = server.lock().await.socket.local_addr().unwrap();
+            let local_addr = socket.local_addr().unwrap();
             let sleep = tokio::time::sleep(tokio::time::Duration::from_millis(1));
             tokio::pin!(sleep);
             // Read incoming UDP packets from the socket and feed them to quiche,
             // until there are no more packets to read.µ
             'read: loop {
-                let mut server = server.lock().await;
                 tokio::select! {
-                    res = server.socket.recv_from(buf) => {
+                    res = socket.recv_from(buf) => {
                         let (len, from) = match res {
                             Ok(v) => {
                                 v
@@ -1145,13 +1147,18 @@ impl AsyncWebTransportServer {
 
                         trace!("got packet {:?}", hdr);
 
-                        let conn_id = ring::hmac::sign(&server.conn_id_seed, &hdr.dcid);
-                        let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                        let conn_id = conn_id.to_vec().into();
+                        let (conn_id, client_known) = {
+                            let server = server.lock().unwrap();
+                            let conn_id = ring::hmac::sign(&server.conn_id_seed, &hdr.dcid);
+                            let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
+                            let conn_id = conn_id.to_vec().into();
+                            let client_known = !server.clients.contains_key(&hdr.dcid) && !server.clients.contains_key(&conn_id);
+                            (conn_id, client_known)
+                        };
 
                         // Lookup a connection based on the packet's connection ID. If there
                         // is no connection matching, create a new one.
-                        let client = if !server.clients.contains_key(&hdr.dcid) && !server.clients.contains_key(&conn_id) {
+                        if client_known {
                             if hdr.ty != quiche::Type::Initial {
                                 error!("Packet is not Initial");
                                 continue 'read;
@@ -1160,15 +1167,15 @@ impl AsyncWebTransportServer {
                             if !quiche::version_is_supported(hdr.version) {
                                 warn!("Doing version negotiation");
 
-                                let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut server.dgrams_buf) {
+                                let len = if let Ok(l) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, buf) {
                                     l
                                 } else {
                                     continue 'read;
                                 };
 
-                                let out = &server.dgrams_buf[..len];
+                                let out = &buf[..len];
 
-                                if let Err(e) = server.socket.send_to(out, from).await {
+                                if let Err(e) = socket.send_to(out, from).await {
                                     panic!("send() failed: {:?}", e);
                                 }
                                 continue 'read;
@@ -1194,13 +1201,13 @@ impl AsyncWebTransportServer {
                                     &scid,
                                     &new_token,
                                     hdr.version,
-                                    &mut server.dgrams_buf,
+                                    buf,
                                 )
                                 .unwrap();
 
-                                let out = &server.dgrams_buf[..len];
+                                let out = &buf[..len];
 
-                                if let Err(e) = server.socket.send_to(out, from).await {
+                                if let Err(e) = socket.send_to(out, from).await {
                                     if e.kind() == std::io::ErrorKind::WouldBlock {
                                         debug!("send() would block");
                                         break;
@@ -1232,9 +1239,9 @@ impl AsyncWebTransportServer {
                             debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
                             let mut conn =
-                                quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut server.quic_config).unwrap();
+                                quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut server.lock().unwrap().quic_config).unwrap();
 
-                            if let Some(keylog) = &mut server.keylog {
+                            if let Some(keylog) = &mut server.lock().unwrap().keylog {
                                 if let Ok(keylog) = keylog.try_clone() {
                                     conn.set_keylog(Box::new(keylog));
                                 }
@@ -1248,20 +1255,19 @@ impl AsyncWebTransportServer {
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
                             };
-
+                            let mut server = server.lock().unwrap();
                             client
                                 .webtransport_sessions
                                 .configure_h3_for_webtransport(&mut server.h3_config)?;
 
                                 server.clients.insert(scid.clone(), client);
 
-                                server.clients.get_mut(&scid).unwrap()
-                        } else {
-                            match server.clients.get_mut(&hdr.dcid) {
-                                Some(v) => v,
+                        }
+                        let mut server = server.lock().unwrap();
+                        let client = match server.clients.get_mut(&hdr.dcid) {
+                            Some(v) => v,
 
-                                None => server.clients.get_mut(&conn_id).unwrap(),
-                            }
+                            None => server.clients.get_mut(&conn_id).unwrap(),
                         };
 
                         let recv_info = quiche::RecvInfo {
@@ -1626,7 +1632,6 @@ pub struct ServerRecvStream {
     stream_id: u64,
     session_id: u64,
     connection_id: Vec<u8>,
-    mutex_poll_state: Option<std::pin::Pin<Box<dyn Future<Output = OwnedMutexGuard<AsyncWebTransportServer>>>>>,
 }
 
 impl ServerRecvStream {
@@ -1636,7 +1641,6 @@ impl ServerRecvStream {
             stream_id,
             session_id,
             connection_id,
-            mutex_poll_state: None,
         }
     }
 }
@@ -1649,30 +1653,21 @@ impl AsyncRead for ServerRecvStream {
     ) -> std::task::Poll<io::Result<()>> {
         
         let stream = self.get_mut();
-        if stream.mutex_poll_state.is_none() {
-            stream.mutex_poll_state = Some(Box::pin(stream.server.clone().lock_owned()));
-        }
-        match stream.mutex_poll_state.as_mut().unwrap().as_mut().poll(cx) {
-            std::task::Poll::Ready(mut server) => {
-                stream.mutex_poll_state = None;
-                match &mut server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
-                    Ok(read) => {
-                        buf.advance(*read);
-                        std::task::Poll::Ready(Ok(()))
-                    },
-                    Err(Error::Finished) => {
-                        std::task::Poll::Ready(Ok(()))
-                    },
-                    Err(Error::Done) => {
-                        server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
-                        std::task::Poll::Pending
-                    }
-                    Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e.to_string())))
-                }
+        let mut server = stream.server.lock().unwrap();
+        match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
+            Ok(read) => {
+                buf.advance(read);
+                std::task::Poll::Ready(Ok(()))
             },
-            std::task::Poll::Pending => return std::task::Poll::Pending,
+            Err(Error::Finished) => {
+                std::task::Poll::Ready(Ok(()))
+            },
+            Err(Error::Done) => {
+                server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
+                std::task::Poll::Pending
+            }
+            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
         }
-        
     }
     
 }
@@ -1690,8 +1685,7 @@ impl ServerSendStream {
         buf: &[u8],
         fin: bool,
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        let server = std::pin::pin!(self.server.lock());
-        let mut server = ready!(server.poll(cx));
+        let mut server = self.server.lock().unwrap();
         match server.write(&self.connection_id, self.stream_id, buf, fin) {
             Ok(read) => {
                 std::task::Poll::Ready(Ok(read))
