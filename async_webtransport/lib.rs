@@ -65,6 +65,7 @@ struct H3Client {
 
     read_blocked_streams: std::collections::HashMap<u64, Waker>,
     write_blocked_streams: std::collections::HashMap<u64, Waker>,
+    open_blocked_streams: Vec<Waker>,
 }
 type ClientMap = HashMap<quiche::ConnectionId<'static>, H3Client>;
 
@@ -742,6 +743,31 @@ impl From<webtransport_quiche::Error> for Error {
     }
 }
 
+struct OpenUni {
+    server: ServerRef,
+    connection_id: Vec<u8>,
+    session_id: u64,
+}
+
+impl std::future::Future for OpenUni {
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+        -> std::task::Poll<Result<u64, Error>>
+    {
+        let mut server = self.server.lock().unwrap();
+        match server.sync_open_uni_stream(&self.connection_id, self.session_id) {
+            Ok(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
+            Err(Error::Done) => {
+                let waker = cx.waker();
+                server.insert_open_stream_waker(&self.connection_id, waker.clone());
+                std::task::Poll::Pending
+            }
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+
+    type Output = Result<u64, Error>;
+}
 
 impl AsyncWebTransportServer {
 
@@ -961,6 +987,7 @@ impl AsyncWebTransportServer {
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
+                                open_blocked_streams: Vec::new(),
                             };
 
                             client
@@ -996,6 +1023,7 @@ impl AsyncWebTransportServer {
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
 
                         self.wake_write_streams(&hdr.dcid.to_vec());
+                        self.wake_open_streams(&hdr.dcid.to_vec());
                         // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
                         let client = self.clients.get_mut(&hdr.dcid).unwrap();
                         // Create a new HTTP/3 connection as soon as the QUIC connection
@@ -1255,6 +1283,7 @@ impl AsyncWebTransportServer {
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
+                                open_blocked_streams: Vec::new(),
                             };
                             let mut server = server.lock().unwrap();
                             client
@@ -1485,6 +1514,16 @@ impl AsyncWebTransportServer {
         Ok(())
     }
 
+    pub fn insert_open_stream_waker(&mut self, client: &Vec<u8>, waker: Waker) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        client.open_blocked_streams.push(waker);
+        Ok(())
+    }
+
     pub fn wake_read_stream(&mut self, client: &Vec<u8>, stream_id: u64) -> Result<(), Error> {
         let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
             Some(c) => c,
@@ -1509,6 +1548,19 @@ impl AsyncWebTransportServer {
         Ok(())
     }
 
+    pub fn wake_open_streams(&mut self, client: &Vec<u8>) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        
+        for waker in client.open_blocked_streams.drain(..) {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+
     pub fn wake_write_streams(&mut self, client: &Vec<u8>) -> Result<(), Error> {
         let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
             Some(c) => c,
@@ -1521,7 +1573,7 @@ impl AsyncWebTransportServer {
         Ok(())
     }
 
-    pub fn open_uni_stream(&mut self, client: &Vec<u8>, session_id: u64) -> Result<u64, Error> {
+    pub fn sync_open_uni_stream(&mut self, client: &Vec<u8>, session_id: u64) -> Result<u64, Error> {
         let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
             Some(c) => c,
             None => return Err(Error::ClientNotFound),
@@ -1529,6 +1581,15 @@ impl AsyncWebTransportServer {
         let h3_conn = client.http3_conn.as_mut().unwrap();
         Ok(client.webtransport_sessions.open_uni_stream(&mut client.conn, h3_conn, session_id)?)
     }
+
+    pub fn open_uni_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> OpenUni {
+        OpenUni {
+            server: server.clone(),
+            connection_id: client.clone(),
+            session_id: session_id,
+        }
+    }
+
 
     pub fn read(&mut self, client: &Vec<u8>, session_id: u64, stream_id: u64, data: &mut [u8]) -> Result<usize, Error> {
         let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
