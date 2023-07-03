@@ -1089,7 +1089,7 @@ impl AsyncWebTransportServer {
                             panic!("send() failed: {:?}", e);
                         }
     
-                        // debug!("{} written {} bytes", client.conn.trace_id(), write);
+                        debug!("written {} bytes", write);
                     }
                 }
             }
