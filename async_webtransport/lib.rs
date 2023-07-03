@@ -745,7 +745,7 @@ impl From<webtransport_quiche::Error> for Error {
 
 impl AsyncWebTransportServer {
 
-    pub fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<AsyncWebTransportServer, Error> {
+    pub fn with_configs(addr: SocketAddr, quic_config: quiche::Config, h3_config: quiche::h3::Config, keylog: Option<File>) -> Result<(AsyncWebTransportServer, tokio::net::UdpSocket), Error> {
     
         // Create the UDP listening socket, and register it with the event loop.
         let socket = std::net::UdpSocket::bind(addr)?;
@@ -756,7 +756,7 @@ impl AsyncWebTransportServer {
 
         
 
-        Ok(AsyncWebTransportServer {
+        Ok((AsyncWebTransportServer {
             buf: [0; 65535],
             dgrams_buf: [0; MAX_DATAGRAM_SIZE],
             quic_config: quic_config,
@@ -764,7 +764,7 @@ impl AsyncWebTransportServer {
             clients:ClientMap::new(),
             conn_id_seed,
             keylog,
-        })
+        }, socket))
     }
 
     pub async fn listen(&mut self, socket: SocketRef) -> Result<Option<Vec<u8>>, Error> {
