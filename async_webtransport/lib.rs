@@ -749,6 +749,7 @@ impl AsyncWebTransportServer {
     
         // Create the UDP listening socket, and register it with the event loop.
         let socket = std::net::UdpSocket::bind(addr)?;
+        socket.set_nonblocking(true)?;
         let socket = tokio::net::UdpSocket::from_std(socket)?;
     
         let rng = SystemRandom::new();
