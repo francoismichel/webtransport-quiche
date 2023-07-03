@@ -743,7 +743,7 @@ impl From<webtransport_quiche::Error> for Error {
     }
 }
 
-struct OpenUni {
+pub struct OpenUni {
     server: ServerRef,
     connection_id: Vec<u8>,
     session_id: u64,
