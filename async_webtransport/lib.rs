@@ -1694,6 +1694,7 @@ pub struct ServerRecvStream {
     server: ServerRef,
     stream_id: u64,
     session_id: u64,
+    buf: Vec<u8>,
     connection_id: Vec<u8>,
 }
 
@@ -1704,6 +1705,7 @@ impl ServerRecvStream {
             stream_id,
             session_id,
             connection_id,
+            buf: vec![0; 1500],
         }
     }
 }
@@ -1717,9 +1719,9 @@ impl AsyncRead for ServerRecvStream {
         
         let stream = self.get_mut();
         let mut server = stream.server.lock().unwrap();
-        match server.read(&stream.connection_id, stream.session_id, stream.stream_id, buf.initialize_unfilled()) {
+        match server.read(&stream.connection_id, stream.session_id, stream.stream_id, &mut stream.buf[..buf.remaining()]) {
             Ok(read) => {
-                buf.advance(read);
+                buf.put_slice(&stream.buf[..read]);
                 std::task::Poll::Ready(Ok(()))
             },
             Err(Error::Finished) => {
