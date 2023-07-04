@@ -28,14 +28,13 @@
 extern crate log;
 pub extern crate tokio;
 pub extern crate regex;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncWrite, AsyncRead};
 use webtransport_quiche::quiche as quiche;
 
 use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
-use std::future::Future;
 use std::task::{Waker, ready};
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
@@ -1470,6 +1469,7 @@ impl AsyncWebTransportServer {
                         &mut client.conn,
                     ) {
                         Ok(Some(session_id)) => {
+                            self.wake_read_stream(scid, stream_id);
                             // handle async behaviours
                             return Ok(Event::StreamData(session_id, stream_id));
                         },
@@ -1487,9 +1487,6 @@ impl AsyncWebTransportServer {
                     return Err(Error::H3Error(e));
                 }
             }
-        }
-        for (stream_id, session_id) in client.webtransport_sessions.readable() {
-            self.wake_read_stream(scid, stream_id);
         }
         Ok(Event::Done)
     }
@@ -1529,8 +1526,8 @@ impl AsyncWebTransportServer {
             Some(c) => c,
             None => return Err(Error::ClientNotFound),
         };
-        
         if let Some(waker) = client.read_blocked_streams.remove(&stream_id) {
+            trace!("wake stream {} for reading", stream_id);
             waker.wake();
         }
         Ok(())
