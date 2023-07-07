@@ -63,8 +63,12 @@ struct H3Client {
     partial_responses: HashMap<u64, PartialResponse>,
 
     accepted_uni_streams: HashSet<u64>,
-    received_non_accepted_uni_streams: VecDeque<u64>,
-    accept_blocked_uni_stream_wakers: VecDeque<Waker>,
+    received_non_accepted_uni_streams: HashMap<u64, VecDeque<u64>>,
+    accept_blocked_uni_stream_wakers: HashMap<u64, VecDeque<Waker>>,
+
+    accepted_bidi_streams: HashSet<u64>,
+    received_non_accepted_bidi_streams: HashMap<u64, VecDeque<u64>>,
+    accept_blocked_bidi_stream_wakers: HashMap<u64, VecDeque<Waker>>,
 
     read_blocked_streams: std::collections::HashMap<u64, Waker>,
     write_blocked_streams: std::collections::HashMap<u64, Waker>,
@@ -765,10 +769,50 @@ impl std::future::Future for AcceptUni {
             None => return std::task::Poll::Ready(Err(Error::ClientNotFound)),
         };
 
-        match client.received_non_accepted_uni_streams.pop_front() {
+        match client.received_non_accepted_uni_streams.get_mut(&self.session_id).and_then(|v| v.pop_front()) {
             Some(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
             None => {
-                client.accept_blocked_uni_stream_wakers.push_back(cx.waker().clone());
+                if !client.accept_blocked_uni_stream_wakers.contains_key(&self.session_id) {
+                    client.accept_blocked_uni_stream_wakers.insert(self.session_id, VecDeque::new());
+                }
+                let accept_blocked_uni = client.accept_blocked_uni_stream_wakers.get_mut(&self.session_id).unwrap();
+                accept_blocked_uni.push_back(cx.waker().clone());
+                std::task::Poll::Pending
+            },
+        }
+    }
+
+    type Output = Result<u64, Error>;
+}
+
+
+pub struct AcceptBidi {
+    server: ServerRef,
+    connection_id: Vec<u8>,
+    session_id: u64,
+}
+
+impl std::future::Future for AcceptBidi {
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+        -> std::task::Poll<Result<u64, Error>>
+    {
+        let mut server = self.server.lock().unwrap();
+
+
+        let client = match server.clients.get_mut(&ConnectionId::from_vec(self.connection_id.clone())) {
+            Some(c) => c,
+            None => return std::task::Poll::Ready(Err(Error::ClientNotFound)),
+        };
+
+        match client.received_non_accepted_bidi_streams.get_mut(&self.session_id).and_then(|v| v.pop_front()) {
+            Some(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
+            None => {
+                if !client.accept_blocked_bidi_stream_wakers.contains_key(&self.session_id) {
+                    client.accept_blocked_bidi_stream_wakers.insert(self.session_id, VecDeque::new());
+                }
+                let accept_blocked_bidi = client.accept_blocked_bidi_stream_wakers.get_mut(&self.session_id).unwrap();
+                accept_blocked_bidi.push_back(cx.waker().clone());
                 std::task::Poll::Pending
             },
         }
@@ -1020,8 +1064,11 @@ impl AsyncWebTransportServer {
                                 partial_responses: HashMap::new(),
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
                                 accepted_uni_streams: HashSet::new(),
-                                received_non_accepted_uni_streams: VecDeque::new(),
-                                accept_blocked_uni_stream_wakers: VecDeque::new(),
+                                received_non_accepted_uni_streams: HashMap::new(),
+                                accept_blocked_uni_stream_wakers: HashMap::new(),
+                                accepted_bidi_streams: HashSet::new(),
+                                received_non_accepted_bidi_streams: HashMap::new(),
+                                accept_blocked_bidi_stream_wakers: HashMap::new(),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
                                 open_blocked_streams: Vec::new(),
@@ -1319,8 +1366,11 @@ impl AsyncWebTransportServer {
                                 partial_responses: HashMap::new(),
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
                                 accepted_uni_streams: HashSet::new(),
-                                received_non_accepted_uni_streams: VecDeque::new(),
-                                accept_blocked_uni_stream_wakers: VecDeque::new(),
+                                received_non_accepted_uni_streams: HashMap::new(),
+                                accept_blocked_uni_stream_wakers: HashMap::new(),
+                                accepted_bidi_streams: HashSet::new(),
+                                received_non_accepted_bidi_streams: HashMap::new(),
+                                accept_blocked_bidi_stream_wakers: HashMap::new(),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
                                 open_blocked_streams: Vec::new(),
@@ -1510,11 +1560,26 @@ impl AsyncWebTransportServer {
                         &mut client.conn,
                     ) {
                         Ok(Some(session_id)) => {
-                            let uni = stream_id & 0x02 != 0;
-                            if uni {
-                                if !client.accepted_uni_streams.contains(&stream_id) && !client.received_non_accepted_uni_streams.contains(&stream_id) {
-                                    client.received_non_accepted_uni_streams.push_back(stream_id);
-                                    if let Some(waker) = client.accept_blocked_uni_stream_wakers.pop_front() {
+                            let bidi = stream_id & 0x02 == 0;
+                            if bidi {
+                                if !client.received_non_accepted_bidi_streams.contains_key(&session_id) {
+                                    client.received_non_accepted_bidi_streams.insert(session_id, VecDeque::new());
+                                }
+                                let received_non_accepted_bidi = client.received_non_accepted_bidi_streams.get_mut(&session_id).unwrap();
+                                if !client.accepted_bidi_streams.contains(&stream_id) && !received_non_accepted_bidi.contains(&stream_id) {
+                                    received_non_accepted_bidi.push_back(stream_id);
+                                    if let Some(waker) = client.accept_blocked_bidi_stream_wakers.get_mut(&session_id).and_then(|v| v.pop_front()) {
+                                        waker.wake();
+                                    }
+                                }
+                            } else {
+                                if !client.received_non_accepted_uni_streams.contains_key(&session_id) {
+                                    client.received_non_accepted_uni_streams.insert(session_id, VecDeque::new());
+                                }
+                                let received_non_accepted_uni = client.received_non_accepted_uni_streams.get_mut(&session_id).unwrap();
+                                if !client.accepted_bidi_streams.contains(&stream_id) && !received_non_accepted_uni.contains(&stream_id) {
+                                    received_non_accepted_uni.push_back(stream_id);
+                                    if let Some(waker) = client.accept_blocked_uni_stream_wakers.get_mut(&session_id).and_then(|v| v.pop_front()) {
                                         waker.wake();
                                     }
                                 }
