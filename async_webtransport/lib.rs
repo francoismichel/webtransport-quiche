@@ -39,7 +39,7 @@ use std::task::{Waker, ready};
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::Arc;
 
 use std::sync::Mutex;
@@ -61,6 +61,10 @@ struct H3Client {
     webtransport_sessions: webtransport_quiche::Sessions,
 
     partial_responses: HashMap<u64, PartialResponse>,
+
+    accepted_uni_streams: HashSet<u64>,
+    received_non_accepted_uni_streams: VecDeque<u64>,
+    accept_blocked_uni_stream_wakers: VecDeque<Waker>,
 
     read_blocked_streams: std::collections::HashMap<u64, Waker>,
     write_blocked_streams: std::collections::HashMap<u64, Waker>,
@@ -742,6 +746,37 @@ impl From<webtransport_quiche::Error> for Error {
     }
 }
 
+pub struct AcceptUni {
+    server: ServerRef,
+    connection_id: Vec<u8>,
+    session_id: u64,
+}
+
+impl std::future::Future for AcceptUni {
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+        -> std::task::Poll<Result<u64, Error>>
+    {
+        let mut server = self.server.lock().unwrap();
+
+
+        let client = match server.clients.get_mut(&ConnectionId::from_vec(self.connection_id.clone())) {
+            Some(c) => c,
+            None => return std::task::Poll::Ready(Err(Error::ClientNotFound)),
+        };
+
+        match client.received_non_accepted_uni_streams.pop_front() {
+            Some(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
+            None => {
+                client.accept_blocked_uni_stream_wakers.push_back(cx.waker().clone());
+                std::task::Poll::Pending
+            },
+        }
+    }
+
+    type Output = Result<u64, Error>;
+}
+
 pub struct OpenUni {
     server: ServerRef,
     connection_id: Vec<u8>,
@@ -984,6 +1019,9 @@ impl AsyncWebTransportServer {
                                 http3_conn: None,
                                 partial_responses: HashMap::new(),
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
+                                accepted_uni_streams: HashSet::new(),
+                                received_non_accepted_uni_streams: VecDeque::new(),
+                                accept_blocked_uni_stream_wakers: VecDeque::new(),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
                                 open_blocked_streams: Vec::new(),
@@ -1280,6 +1318,9 @@ impl AsyncWebTransportServer {
                                 http3_conn: None,
                                 partial_responses: HashMap::new(),
                                 webtransport_sessions: webtransport_quiche::Sessions::new(true),
+                                accepted_uni_streams: HashSet::new(),
+                                received_non_accepted_uni_streams: VecDeque::new(),
+                                accept_blocked_uni_stream_wakers: VecDeque::new(),
                                 read_blocked_streams: std::collections::HashMap::new(),
                                 write_blocked_streams: std::collections::HashMap::new(),
                                 open_blocked_streams: Vec::new(),
@@ -1469,6 +1510,15 @@ impl AsyncWebTransportServer {
                         &mut client.conn,
                     ) {
                         Ok(Some(session_id)) => {
+                            let uni = stream_id & 0x02 != 0;
+                            if uni {
+                                if !client.accepted_uni_streams.contains(&stream_id) && !client.received_non_accepted_uni_streams.contains(&stream_id) {
+                                    client.received_non_accepted_uni_streams.push_back(stream_id);
+                                    if let Some(waker) = client.accept_blocked_uni_stream_wakers.pop_front() {
+                                        waker.wake();
+                                    }
+                                }
+                            }
                             self.wake_read_stream(scid, stream_id);
                             // handle async behaviours
                             return Ok(Event::StreamData(session_id, stream_id));
@@ -1581,6 +1631,14 @@ impl AsyncWebTransportServer {
 
     pub fn open_uni_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> OpenUni {
         OpenUni {
+            server: server.clone(),
+            connection_id: client.clone(),
+            session_id: session_id,
+        }
+    }
+
+    pub fn accept_uni_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> AcceptUni {
+        AcceptUni {
             server: server.clone(),
             connection_id: client.clone(),
             session_id: session_id,
