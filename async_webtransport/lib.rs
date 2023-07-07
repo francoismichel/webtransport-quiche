@@ -1710,6 +1710,14 @@ impl AsyncWebTransportServer {
         }
     }
 
+    pub fn accept_bidi_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> AcceptBidi {
+        AcceptBidi {
+            server: server.clone(),
+            connection_id: client.clone(),
+            session_id: session_id,
+        }
+    }
+
 
     pub fn read(&mut self, client: &Vec<u8>, session_id: u64, stream_id: u64, data: &mut [u8]) -> Result<usize, Error> {
         let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
