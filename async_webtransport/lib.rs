@@ -1577,7 +1577,7 @@ impl AsyncWebTransportServer {
                                     client.received_non_accepted_uni_streams.insert(session_id, VecDeque::new());
                                 }
                                 let received_non_accepted_uni = client.received_non_accepted_uni_streams.get_mut(&session_id).unwrap();
-                                if !client.accepted_bidi_streams.contains(&stream_id) && !received_non_accepted_uni.contains(&stream_id) {
+                                if !client.accepted_uni_streams.contains(&stream_id) && !received_non_accepted_uni.contains(&stream_id) {
                                     received_non_accepted_uni.push_back(stream_id);
                                     if let Some(waker) = client.accept_blocked_uni_stream_wakers.get_mut(&session_id).and_then(|v| v.pop_front()) {
                                         waker.wake();
