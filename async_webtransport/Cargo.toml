@@ -21,6 +21,11 @@ regex = "1.7.0"
 docopt = "1"
 thiserror = "1"
 
+bytes = "1"
+moq-generic-transport = {git = "https://github.com/francoismichel/moq-rs-quiche", branch = "generic-transport-trait"}
+anyhow = "1.0.70"
+
+
 [lib]
 name = "async_webtransport_handler"
 path = "lib.rs"

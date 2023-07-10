@@ -35,7 +35,7 @@ use tokio::net::UdpSocket;
 use webtransport_quiche::quiche::ConnectionId;
 
 use std::fs::File;
-use std::task::{Waker, ready};
+use std::task::Waker;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 
@@ -46,6 +46,7 @@ use std::sync::Mutex;
 
 use ring::rand::*;
 use thiserror::Error as Error;
+use bytes::{Buf, Bytes};
 
 
 use webtransport_quiche::quiche::h3::NameValue;
@@ -837,8 +838,40 @@ impl std::future::Future for OpenUni {
             Ok(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
             Err(Error::Done) => {
                 let waker = cx.waker();
-                server.insert_open_stream_waker(&self.connection_id, waker.clone());
-                std::task::Poll::Pending
+                if let Err(e) = server.insert_open_stream_waker(&self.connection_id, waker.clone()) {
+                    std::task::Poll::Ready(Err(e))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
+    }
+
+    type Output = Result<u64, Error>;
+}
+
+pub struct OpenBidi {
+    server: ServerRef,
+    connection_id: Vec<u8>,
+    session_id: u64,
+}
+
+impl std::future::Future for OpenBidi {
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>)
+        -> std::task::Poll<Result<u64, Error>>
+    {
+        let mut server = self.server.lock().unwrap();
+        match server.sync_open_bidi_stream(&self.connection_id, self.session_id) {
+            Ok(stream_id) => std::task::Poll::Ready(Ok(stream_id)),
+            Err(Error::Done) => {
+                let waker = cx.waker();
+                if let Err(e) = server.insert_open_stream_waker(&self.connection_id, waker.clone()) {
+                    std::task::Poll::Ready(Err(e))
+                } else {
+                    std::task::Poll::Pending
+                }
             }
             Err(e) => std::task::Poll::Ready(Err(e)),
         }
@@ -1106,8 +1139,8 @@ impl AsyncWebTransportServer {
 
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
 
-                        self.wake_write_streams(&hdr.dcid.to_vec());
-                        self.wake_open_streams(&hdr.dcid.to_vec());
+                        self.wake_write_streams(&hdr.dcid.to_vec())?;
+                        self.wake_open_streams(&hdr.dcid.to_vec())?;
                         // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
                         let client = self.clients.get_mut(&hdr.dcid).unwrap();
                         // Create a new HTTP/3 connection as soon as the QUIC connection
@@ -1407,7 +1440,7 @@ impl AsyncWebTransportServer {
     
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
     
-                        server.wake_write_streams(&hdr.dcid.to_vec());
+                        server.wake_write_streams(&hdr.dcid.to_vec())?;
                         // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
                         let client = server.clients.get_mut(&hdr.dcid).unwrap();
                         // Create a new HTTP/3 connection as soon as the QUIC connection
@@ -1420,7 +1453,6 @@ impl AsyncWebTransportServer {
                                 client.conn.trace_id()
                             );
                             
-                            let c = &server.h3_config;
                             let h3_conn =
                                 match server.create_client_connection(&hdr.dcid.to_vec()) {
                                     Ok(v) => v,
@@ -1584,7 +1616,7 @@ impl AsyncWebTransportServer {
                                     }
                                 }
                             }
-                            self.wake_read_stream(scid, stream_id);
+                            self.wake_read_stream(scid, stream_id)?;
                             // handle async behaviours
                             return Ok(Event::StreamData(session_id, stream_id));
                         },
@@ -1694,8 +1726,25 @@ impl AsyncWebTransportServer {
         Ok(client.webtransport_sessions.open_uni_stream(&mut client.conn, h3_conn, session_id)?)
     }
 
+    pub fn sync_open_bidi_stream(&mut self, client: &Vec<u8>, session_id: u64) -> Result<u64, Error> {
+        let client = match self.clients.get_mut(&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        let h3_conn = client.http3_conn.as_mut().unwrap();
+        Ok(client.webtransport_sessions.open_bidi_stream(&mut client.conn, h3_conn, session_id)?)
+    }
+
     pub fn open_uni_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> OpenUni {
         OpenUni {
+            server: server.clone(),
+            connection_id: client.clone(),
+            session_id: session_id,
+        }
+    }
+
+    pub fn open_bidi_stream_ref(server: ServerRef, client: &Vec<u8>, session_id: u64) -> OpenBidi {
+        OpenBidi {
             server: server.clone(),
             connection_id: client.clone(),
             session_id: session_id,
@@ -1747,15 +1796,137 @@ impl AsyncWebTransportServer {
         Ok(client.webtransport_sessions.stream_write(&mut client.conn, h3_conn, stream_id, data, fin)?)
     }
 
-
-    pub fn close_session(&mut self, client: &Vec<u8>) -> Result<(), Error> {
+    pub fn is_stream_writable(&mut self, client: &Vec<u8>, stream_id: u64) -> Result<bool, Error> {
         let client = match self.clients.get_mut(&&ConnectionId::from_vec(client.clone())) {
             Some(c) => c,
             None => return Err(Error::ClientNotFound),
         };
-        Ok(client.conn.close(true, 0, b"session closed by the application")?)
+        Ok(client.conn.stream_writable(stream_id, 1)?)
     }
 
+    pub fn close_session(&mut self, client: &Vec<u8>, reason: &[u8]) -> Result<(), Error> {
+        let client = match self.clients.get_mut(&&ConnectionId::from_vec(client.clone())) {
+            Some(c) => c,
+            None => return Err(Error::ClientNotFound),
+        };
+        Ok(client.conn.close(true, 0, reason)?)
+    }
+}
+
+#[derive(Clone)]
+struct WebTransportSession {
+    server: ServerRef,
+    connection_id: Vec<u8>,
+    session_id: u64,
+}
+
+impl WebTransportSession {
+
+    fn _poll_open_bidi(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<ServerBidiStream, anyhow::Error>> {
+        let fut = AsyncWebTransportServer::open_bidi_stream_ref(self.server.clone(), &self.connection_id, self.session_id);
+        let fut = std::pin::pin!(fut);
+        std::future::Future::poll(fut, cx)
+            .map_ok(|stream_id| ServerBidiStream::new(self.server.clone(), self.connection_id.clone(), self.session_id, stream_id))
+            .map_err(|e| e.into())
+    }
+
+    fn _poll_open_send(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<ServerSendStream, anyhow::Error>> {
+        let fut = AsyncWebTransportServer::open_uni_stream_ref(self.server.clone(), &self.connection_id, self.session_id);
+        let fut = std::pin::pin!(fut);
+        std::future::Future::poll(fut, cx)
+            .map_ok(|stream_id| ServerSendStream::new(self.server.clone(), self.connection_id.clone(), self.session_id, stream_id))
+            .map_err(|e| e.into())
+    }
+
+    fn close_session(&mut self, _code: u64, reason: &[u8]) -> Result<(), Error> {
+        self.server.lock().unwrap().close_session(&self.connection_id, reason)
+    }
+}
+
+impl std::fmt::Debug for WebTransportSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebTransportSession").field("connection_id", &self.connection_id).field("session_id", &self.session_id).finish()
+    }
+}
+
+impl moq_generic_transport::Connection for WebTransportSession {
+    type BidiStream = ServerBidiStream;
+
+    type SendStream = ServerSendStream;
+
+    type RecvStream = ServerRecvStream;
+
+    fn poll_accept_recv(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Self::RecvStream>, anyhow::Error>> {
+        let fut = AsyncWebTransportServer::accept_uni_stream_ref(self.server.clone(), &self.connection_id, self.session_id);
+        let fut = std::pin::pin!(fut);
+        std::future::Future::poll(fut, cx)
+            .map_ok(|stream_id| Some(ServerRecvStream::new(self.server.clone(), self.connection_id.clone(), self.session_id, stream_id)))
+            .map_err(|e| e.into())
+    }
+
+    fn poll_accept_bidi(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Self::BidiStream>, anyhow::Error>> {
+        let fut = AsyncWebTransportServer::accept_bidi_stream_ref(self.server.clone(), &self.connection_id, self.session_id);
+        let fut = std::pin::pin!(fut);
+        std::future::Future::poll(fut, cx)
+            .map_ok(|stream_id| Some(ServerBidiStream::new(self.server.clone(), self.connection_id.clone(), self.session_id, stream_id)))
+            .map_err(|e| e.into())
+    }
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Self::BidiStream, anyhow::Error>> {
+        self._poll_open_bidi(cx)
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Self::SendStream, anyhow::Error>> {
+        self._poll_open_send(cx)
+    }
+
+    fn close(&mut self, code: u64, reason: &[u8]) {
+        self.close_session(code, reason);
+    }
+}
+
+impl moq_generic_transport::OpenStreams for WebTransportSession {
+    type BidiStream = ServerBidiStream;
+
+    type SendStream = ServerSendStream;
+
+    type RecvStream = ServerRecvStream;
+
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Self::BidiStream, anyhow::Error>> {
+        self._poll_open_bidi(cx)
+    }
+
+    fn poll_open_send(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Self::SendStream, anyhow::Error>> {
+        self._poll_open_send(cx)
+    }
+
+    fn close(&mut self, code: u64, reason: &[u8]) {
+        self.close_session(code, reason);
+    }
 }
 
 pub type ServerRef = Arc<Mutex<AsyncWebTransportServer>>;
@@ -1768,7 +1939,7 @@ pub struct ServerBidiStream {
 impl ServerBidiStream {
 
     pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64, stream_id: u64) -> ServerBidiStream {
-        let send = ServerSendStream::new(server.clone(), connection_id.clone(), stream_id);
+        let send = ServerSendStream::new(server.clone(), connection_id.clone(), session_id, stream_id);
         let recv = ServerRecvStream::new(server.clone(), connection_id.clone(), session_id, stream_id);
         ServerBidiStream {
             send,
@@ -1780,6 +1951,55 @@ impl ServerBidiStream {
         (self.send, self.recv)
     }
 }
+
+impl moq_generic_transport::RecvStream for ServerBidiStream {
+    type Buf = Bytes;
+    type Error = anyhow::Error;
+
+    fn poll_data(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Self::Buf>, anyhow::Error>> {
+        self.recv.poll_data(cx)
+    }
+
+    fn stop_sending(&mut self, error_code: u64) {
+        self.recv.stop_sending(error_code)
+    }
+
+    fn recv_id(&self) -> u64 {
+        self.recv.recv_id()
+    }
+}
+
+impl moq_generic_transport::SendStream for ServerBidiStream {
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), anyhow::Error>> {
+        self.send.poll_ready(cx)
+    }
+
+    fn poll_finish(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), anyhow::Error>> {
+        self.send.poll_finish(cx)
+    }
+
+    fn reset(&mut self, reset_code: u64) {
+        self.send.reset(reset_code)
+    }
+
+    fn send_id(&self) -> u64 {
+        self.send.send_id()
+    }
+}
+
+impl<B: Buf> moq_generic_transport::BidiStream<B> for ServerBidiStream {
+    type SendStream = ServerSendStream;
+
+    type RecvStream = ServerRecvStream;
+
+    fn split(self) -> (Self::SendStream, Self::RecvStream) {
+        (self.send, self.recv)
+    }
+}
+
 
 impl AsyncRead for ServerBidiStream {
 
@@ -1838,6 +2058,7 @@ impl ServerRecvStream {
     }
 }
 
+
 impl AsyncRead for ServerRecvStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -1856,8 +2077,11 @@ impl AsyncRead for ServerRecvStream {
                 std::task::Poll::Ready(Ok(()))
             },
             Err(Error::Done) => {
-                server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone());
-                std::task::Poll::Pending
+                if let Err(e) = server.insert_read_waker(&stream.connection_id, stream.stream_id, cx.waker().clone()) {
+                    std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
+                } else {
+                    std::task::Poll::Pending
+                }
             }
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
         }
@@ -1865,9 +2089,47 @@ impl AsyncRead for ServerRecvStream {
     
 }
 
+impl moq_generic_transport::RecvStream for ServerRecvStream {
+    type Buf = Bytes;
+    type Error = anyhow::Error;
+
+    fn poll_data(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Self::Buf>, anyhow::Error>> {
+        let mut server = self.server.lock().unwrap();
+        let mut buf = [0; 10000];
+        match server.read(&self.connection_id, self.session_id, self.stream_id, &mut buf[..]) {
+            Ok(read) => {
+                std::task::Poll::Ready(Ok(Some(bytes::Bytes::copy_from_slice(&buf[..read]))))
+            },
+            Err(Error::Finished) => {
+                std::task::Poll::Ready(Ok(None))
+            },
+            Err(Error::Done) => {
+                if let Err(e) = server.insert_read_waker(&self.connection_id, self.stream_id, cx.waker().clone()) {
+                    std::task::Poll::Ready(Err(e.into()))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+            Err(e) => std::task::Poll::Ready(Err(e.into()))
+        }
+    }
+
+    fn stop_sending(&mut self, _error_code: u64) {
+        todo!()
+    }
+
+    fn recv_id(&self) -> u64 {
+        self.stream_id
+    }
+}
+
 pub struct ServerSendStream {
     server: ServerRef,
     stream_id: u64,
+    _session_id: u64,
     connection_id: Vec<u8>,
 }
 
@@ -1880,20 +2142,24 @@ impl ServerSendStream {
     ) -> std::task::Poll<Result<usize, io::Error>> {
         let mut server = self.server.lock().unwrap();
         match server.write(&self.connection_id, self.stream_id, buf, fin) {
-            Ok(read) => {
-                std::task::Poll::Ready(Ok(read))
+            Ok(written) => {
+                std::task::Poll::Ready(Ok(written))
             },
             Err(Error::Done) => {
-                server.insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone());
-                std::task::Poll::Pending
+                if let Err(e) = server.insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone()) {
+                    std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e)))
+                } else {
+                    std::task::Poll::Pending
+                }
             },
             Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(io::ErrorKind::Other, e))),
         }
     }
 
-    pub fn new(server: ServerRef, connection_id: Vec<u8>, stream_id: u64) -> ServerSendStream {
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, _session_id: u64, stream_id: u64) -> ServerSendStream {
         ServerSendStream {
             server,
+            _session_id,
             stream_id,
             connection_id,
         }
@@ -1906,6 +2172,75 @@ impl Drop for ServerSendStream {
     fn drop(&mut self) {
         let mut server = self.server.lock().unwrap();
         server.write(&self.connection_id, self.stream_id, &[], true);
+    }
+}
+
+impl moq_generic_transport::SendStream for ServerSendStream {
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), anyhow::Error>> {
+        let mut server = self.server.lock().unwrap();
+        match server.is_stream_writable(&self.connection_id, self.stream_id) {
+            Ok(true) => std::task::Poll::Ready(Ok(())),
+            Ok(false) => {
+                if let Err(e) = server.insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone()) {
+                    std::task::Poll::Ready(Err(e.into()))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+            Err(e) => {
+                std::task::Poll::Ready(Err(e.into()))
+            }
+        }
+    }
+
+    fn poll_finish(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), anyhow::Error>> {
+        
+        let mut server = self.server.lock().unwrap();
+        match server.write(&self.connection_id, self.stream_id, &[], true) {
+            Ok(_) => {
+                std::task::Poll::Ready(Ok(()))
+            },
+            Err(Error::Done) => {
+                if let Err(e) = server.insert_write_waker(&self.connection_id, self.stream_id, cx.waker().clone()) {
+                    std::task::Poll::Ready(Err(e.into()))
+                } else {
+                    std::task::Poll::Pending
+                }
+            },
+            Err(e) => std::task::Poll::Ready(Err(e.into())),
+        }
+    }
+
+    fn reset(&mut self, _reset_code: u64) {
+        todo!()
+    }
+
+    fn send_id(&self) -> u64 {
+        self.stream_id
+    }
+}
+
+
+/// Allows sending unframed pure bytes to a stream. Similar to [`AsyncWrite`](https://docs.rs/tokio/latest/tokio/io/trait.AsyncWrite.html)
+impl<B: Buf> moq_generic_transport::SendStreamUnframed<B> for ServerSendStream {
+    /// Attempts write data into the stream.
+    ///
+    /// Returns the number of bytes written.
+    ///
+    /// `buf` is advanced by the number of bytes written.
+    fn poll_send<D: Buf>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut D,
+    ) -> std::task::Poll<Result<usize, anyhow::Error>> {
+        let chunk = buf.chunk();
+        match std::task::ready!(self._poll_write(cx, chunk, false)) {
+            Ok(written) => {
+                buf.advance(written);
+                std::task::Poll::Ready(Ok(written))
+            }
+            Err(e) => std::task::Poll::Ready(Err(e.into()))
+        }
     }
 }
 
