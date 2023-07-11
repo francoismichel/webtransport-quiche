@@ -1814,13 +1814,17 @@ impl AsyncWebTransportServer {
 }
 
 #[derive(Clone)]
-struct WebTransportSession {
+pub struct WebTransportSession {
     server: ServerRef,
     connection_id: Vec<u8>,
     session_id: u64,
 }
 
 impl WebTransportSession {
+
+    pub fn new(server: ServerRef, connection_id: Vec<u8>, session_id: u64) -> WebTransportSession {
+        WebTransportSession { server, connection_id, session_id }
+    }
 
     fn _poll_open_bidi(
         &mut self,
