@@ -1954,7 +1954,6 @@ impl ServerBidiStream {
 
 impl moq_generic_transport::RecvStream for ServerBidiStream {
     type Buf = Bytes;
-    type Error = anyhow::Error;
 
     fn poll_data(
         &mut self,
@@ -1990,7 +1989,7 @@ impl moq_generic_transport::SendStream for ServerBidiStream {
     }
 }
 
-impl<B: Buf> moq_generic_transport::BidiStream<B> for ServerBidiStream {
+impl moq_generic_transport::BidiStream for ServerBidiStream {
     type SendStream = ServerSendStream;
 
     type RecvStream = ServerRecvStream;
@@ -2091,7 +2090,6 @@ impl AsyncRead for ServerRecvStream {
 
 impl moq_generic_transport::RecvStream for ServerRecvStream {
     type Buf = Bytes;
-    type Error = anyhow::Error;
 
     fn poll_data(
         &mut self,
@@ -2222,7 +2220,7 @@ impl moq_generic_transport::SendStream for ServerSendStream {
 
 
 /// Allows sending unframed pure bytes to a stream. Similar to [`AsyncWrite`](https://docs.rs/tokio/latest/tokio/io/trait.AsyncWrite.html)
-impl<B: Buf> moq_generic_transport::SendStreamUnframed<B> for ServerSendStream {
+impl moq_generic_transport::SendStreamUnframed for ServerSendStream {
     /// Attempts write data into the stream.
     ///
     /// Returns the number of bytes written.
