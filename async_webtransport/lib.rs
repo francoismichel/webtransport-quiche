@@ -1441,6 +1441,7 @@ impl AsyncWebTransportServer {
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
     
                         server.wake_write_streams(&hdr.dcid.to_vec())?;
+                        server.wake_open_streams(&hdr.dcid.to_vec())?;
                         // TODO: avoid re-borrowing the client to avoid double borrow due to the line above
                         let client = server.clients.get_mut(&hdr.dcid).unwrap();
                         // Create a new HTTP/3 connection as soon as the QUIC connection
